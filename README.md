@@ -1,7 +1,7 @@
 # Sistema de Gestión de Ventas
 
 ## Descripción
-Breve descripción de la aplicación web moderna enfocada en el control de ventas.
+La aplicación web creada como proyecto de la universidad para llevar el control y la gestión de ventas de un negocio de forma sencilla permitiendo registrar productos y consultar la información principal del sistema.
 
 ## Integrantes
 Alain Vallejos
