@@ -1,16 +1,25 @@
 const express = require("express");
+const path = require("path");
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3001;
 
-// Importar las rutas organizadas
 const apiRoutes = require("./routes/apiRoutes");
 
-// Ruta principal del servidor
-app.get("/", (req, res) => {
-    res.send("Bienvenido al Sistema de Gestión de Ventas");
+app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
+
+app.get("/info", (req, res) => {
+    res.send("Sistema web para administrar productos, pedidos y ventas de la cafetería Moka.");
 });
 
-// Conectar las rutas de la API bajo el prefijo "/api"
+app.get("/contacto", (req, res) => {
+    res.send("Correo: contacto@moka.com");
+});
+
+app.get("/productos", (req, res) => {
+    res.send("Módulo de productos y control de stock de Moka");
+});
+
 app.use("/api", apiRoutes);
 
 app.listen(PORT, () => {

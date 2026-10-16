@@ -1,41 +1,42 @@
 const express = require("express");
 const router = express.Router();
 
-// Ruta base de la API (/api)
 router.get("/", (req, res) => {
     res.json({
-        mensaje: "API funcionando correctamente",
-        curso: "Tecnología Web II",
-        estado: "activo"
+        nombre: "Moka - Sistema de Ventas",
+        version: "1.0",
+        estado: "En desarrollo"
     });
 });
 
-// Ruta de estado del sistema
 router.get("/estado", (req, res) => {
     res.json({
-        sistema: "Tecnología Web II",
+        sistema: "Moka",
         estado: "funcionando",
         servidor: "Node.js + Express"
     });
 });
 
-// Ruta de listado de productos contextualizada a tu sistema de ventas
+const productos = [
+    { id: 1, nombre: "Espresso", precio: 10, categoria: "Cafés", stock: 50 },
+    { id: 2, nombre: "Capuchino", precio: 15, categoria: "Cafés", stock: 40 },
+    { id: 3, nombre: "Latte", precio: 16, categoria: "Cafés", stock: 35 },
+    { id: 4, nombre: "Brownie", precio: 12, categoria: "Postres", stock: 20 }
+];
+
 router.get("/productos", (req, res) => {
-    const productos = [
-        { id: 1, nombre: "Laptop HP Victus", precio: 5500 },
-        { id: 2, nombre: "Xiaomi Redmi Note 14", precio: 2200 },
-        { id: 3, nombre: "Proyector Xiaomi", precio: 1800 }
-    ];
     res.json(productos);
 });
 
-// Ruta dinámica con parámetro :id
 router.get("/productos/:id", (req, res) => {
     const id = Number(req.params.id);
-    res.json({
-        mensaje: "Producto solicitado del sistema de ventas",
-        id: id
-    });
+    const producto = productos.find((item) => item.id === id);
+
+    if (!producto) {
+        return res.status(404).json({ mensaje: "Producto no encontrado" });
+    }
+
+    res.json(producto);
 });
 
 module.exports = router;
