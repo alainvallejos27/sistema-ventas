@@ -194,7 +194,15 @@ router.delete("/categorias/:nombre", (req, res) => {
 });
 
 router.get("/productos", (req, res) => {
-    res.json(productos.filter((producto) => producto.activo));
+    let resultado = productos.filter((producto) => producto.activo);
+    const { buscar } = req.query;
+
+    if (buscar) {
+        const termino = String(buscar).toLowerCase();
+        resultado = resultado.filter((p) => p.nombre.toLowerCase().includes(termino));
+    }
+
+    res.json(resultado);
 });
 
 router.get("/productos/:id", (req, res) => {
@@ -208,10 +216,15 @@ router.get("/productos/:id", (req, res) => {
 });
 
 router.post("/productos", (req, res) => {
-    const { nombre, categoria, precio, descripcion, imagen, stock } = req.body || {};
+    const { nombre, categoria, precio, descripcion, imagen, stock, activo } = req.body || {};
 
     if (!nombre || !categoria || Number.isNaN(Number(precio))) {
         return responderError(res, 400, "Faltan datos obligatorios: nombre, categoria y precio");
+    }
+
+    // Validación obligatoria de la Ficha F: si mandan activo, debe ser un booleano (true o false)
+    if (activo !== undefined && typeof activo !== 'boolean') {
+        return responderError(res, 400, "El campo activo debe ser un valor booleano (true o false)");
     }
 
     const producto = normalizarProducto({
@@ -222,7 +235,7 @@ router.post("/productos", (req, res) => {
         descripcion,
         imagen,
         stock: stock ?? 0,
-        activo: true
+        activo: activo !== undefined ? activo : true
     });
 
     productos.push(producto);
@@ -233,6 +246,13 @@ router.put("/productos/:id", (req, res) => {
     const producto = obtenerProductoPorId(req.params.id);
     if (!producto) {
         return responderError(res, 404, "Producto no encontrado");
+    }
+
+    const { activo } = req.body || {};
+
+    // Validación obligatoria de la Ficha F en el PUT
+    if (activo !== undefined && typeof activo !== 'boolean') {
+        return responderError(res, 400, "El campo activo debe ser un valor booleano (true o false)");
     }
 
     const actualizado = normalizarProducto({
@@ -259,7 +279,6 @@ router.delete("/productos/:id", (req, res) => {
         activo: false
     });
 });
-
 router.get("/insumos", (req, res) => res.json(insumos));
 router.get("/insumos/alertas/stock-bajo", (req, res) => res.json(insumos.filter((item) => item.stock <= item.stockMinimo)));
 router.post("/insumos", (req, res) => {
