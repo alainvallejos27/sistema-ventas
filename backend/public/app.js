@@ -1,12 +1,4 @@
-const products = [
-    { id: 1, name: "Espresso", category: "Cafés", price: 10, description: "Corto, intenso y recién molido.", image: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=700&q=80" },
-    { id: 2, name: "Capuchino", category: "Cafés", price: 15, description: "Espresso, leche y espuma suave.", image: "https://images.unsplash.com/photo-1534778101976-62847782c213?auto=format&fit=crop&w=700&q=80" },
-    { id: 3, name: "Latte", category: "Cafés", price: 16, description: "Leche cremosa y un doble espresso.", image: "https://images.unsplash.com/photo-1461023058943-07fcbe16d735?auto=format&fit=crop&w=700&q=80" },
-    { id: 4, name: "Cold brew", category: "Cafés", price: 18, description: "Extracción lenta, servido bien frío.", image: "https://images.unsplash.com/photo-1517701604599-bb29b565090c?auto=format&fit=crop&w=700&q=80" },
-    { id: 5, name: "Brownie", category: "Postres", price: 12, description: "Chocolate oscuro, centro húmedo.", image: "https://images.unsplash.com/photo-1606313564200-e75d5e30476c?auto=format&fit=crop&w=700&q=80" },
-    { id: 6, name: "Croissant", category: "Postres", price: 14, description: "Hojaldre dorado, hecho esta mañana.", image: "https://images.unsplash.com/photo-1555507036-ab1f4038808a?auto=format&fit=crop&w=700&q=80" },
-    { id: 7, name: "Sándwich de la casa", category: "Sándwiches", price: 24, description: "Pan tostado, queso y vegetales frescos.", image: "https://images.unsplash.com/photo-1528735602780-2552fd46c7af?auto=format&fit=crop&w=700&q=80" }
-];
+let products = [];
 
 const cart = new Map();
 let activeCategory = "Todos";
@@ -22,6 +14,54 @@ const paymentDialog = document.querySelector("#payment-dialog");
 
 function formatMoney(value) {
     return `Bs ${value.toFixed(2).replace(".", ",")}`;
+}
+
+async function requestJson(url, options) {
+    let response;
+    try {
+        response = await fetch(url, options);
+    } catch {
+        throw new Error("No se pudo conectar con el servidor. Ejecuta node backend/server.js e inténtalo nuevamente.");
+    }
+    const data = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(data?.mensaje || "No se pudo completar la solicitud");
+    return data;
+}
+
+function mapProduct(product) {
+    return {
+        id: Number(product.id),
+        name: product.nombre,
+        category: product.categoria,
+        price: Number(product.precio),
+        description: product.descripcion,
+        image: product.imagen,
+        stock: Number(product.stock || 0)
+    };
+}
+
+async function loadProducts() {
+    try {
+        const response = await requestJson("/api/productos");
+        products = response.map(mapProduct);
+        renderFilters();
+        renderProducts();
+    } catch (error) {
+        document.querySelector("#connection-badge").innerHTML = "<span></span> API SIN CONEXION";
+        productGrid.innerHTML = `<p class="empty-results">${error.message}. <button class="text-button" type="button" id="retry-products">Reintentar</button></p>`;
+        document.querySelector("#retry-products")?.addEventListener("click", loadProducts);
+    }
+}
+
+async function loadTodayStats() {
+    try {
+        const report = await requestJson("/api/reportes/ventas-dia");
+        document.querySelector("#sales-total").textContent = formatMoney(Number(report.total || 0));
+        document.querySelector("#orders-count").textContent = String(report.ventas?.length || 0);
+        document.querySelector("#connection-badge").innerHTML = "<span></span> API CONECTADA";
+    } catch {
+        document.querySelector("#connection-badge").innerHTML = "<span></span> API SIN CONEXION";
+    }
 }
 
 function renderDate() {
@@ -144,20 +184,39 @@ document.querySelector("#clear-order").addEventListener("click", () => {
 
 document.querySelector("#checkout-button").addEventListener("click", () => paymentDialog.showModal());
 
-document.querySelector("#payment-form").addEventListener("submit", (event) => {
+document.querySelector("#payment-form").addEventListener("submit", async (event) => {
     if (event.submitter?.value !== "confirm") return;
     event.preventDefault();
     const total = [...cart.values()].reduce((sum, item) => sum + item.product.price * item.quantity, 0);
     const paymentMethod = new FormData(event.currentTarget).get("payment");
-    todaySales += total;
-    orderSequence += 1;
-    document.querySelector("#sales-total").textContent = `Bs ${todaySales.toFixed(0)}`;
-    document.querySelector("#orders-count").textContent = String(orderSequence - 1);
-    document.querySelector("#preparing-count").innerHTML = `${orderSequence - 1} <small>pedidos</small>`;
-    cart.clear();
-    renderCart();
-    paymentDialog.close();
-    showToast(`Cobro de ${formatMoney(total)} registrado como ${paymentMethod}. Demostración local; no se guardó en la base de datos.`);
+    const items = [...cart.values()].map(({ product, quantity }) => ({ productoId: product.id, cantidad: quantity }));
+    const confirmButton = document.querySelector("#confirm-payment");
+    confirmButton.disabled = true;
+    try {
+        const pedido = await requestJson("/api/pedidos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ items })
+        });
+        await requestJson("/api/ventas", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pedidoId: pedido.id, metodo: paymentMethod, items, total })
+        });
+        todaySales += total;
+        orderSequence += 1;
+        document.querySelector("#sales-total").textContent = formatMoney(todaySales);
+        document.querySelector("#orders-count").textContent = String(orderSequence - 1);
+        document.querySelector("#preparing-count").innerHTML = `${orderSequence - 1} <small>pedidos</small>`;
+        cart.clear();
+        renderCart();
+        paymentDialog.close();
+        showToast(`Cobro de ${formatMoney(total)} registrado como ${paymentMethod}.`);
+    } catch (error) {
+        showToast(error.message);
+    } finally {
+        confirmButton.disabled = false;
+    }
 });
 
 document.addEventListener("keydown", (event) => {
@@ -167,7 +226,78 @@ document.addEventListener("keydown", (event) => {
     }
 });
 
+const routeNames = { "/": "Punto de venta", "/pedidos": "Pedidos", "/productos": "Productos", "/categorias": "Categorías", "/inventario": "Inventario" };
+
+function currentRoute() {
+    return window.location.hash.replace(/^#/, "") || "/";
+}
+
+function updateRoute() {
+    const route = routeNames[currentRoute()] ? currentRoute() : "/";
+    document.querySelectorAll("[data-module]").forEach((section) => { section.classList.toggle("visible", section.dataset.module === route.slice(1)); });
+    document.querySelector(".pos-layout").hidden = route !== "/";
+    document.querySelector(".welcome-row").hidden = route !== "/";
+    document.querySelector(".quick-stats").hidden = route !== "/";
+    document.querySelector(".menu-section")?.closest(".pos-layout");
+    document.querySelectorAll(".nav-link[data-route]").forEach((link) => {
+        const active = link.dataset.route === route;
+        link.classList.toggle("active", active);
+        if (active) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+    });
+    document.querySelector(".breadcrumb strong").textContent = routeNames[route];
+    if (route === "/pedidos") loadOrders();
+    if (route === "/productos") loadAdminProducts();
+    if (route === "/categorias") loadCategories();
+    if (route === "/inventario") loadInventory();
+}
+
+async function loadOrders(status = "TODOS") {
+    const orders = await requestJson("/api/pedidos").catch(() => []);
+    const visible = status === "TODOS" ? orders : orders.filter((order) => order.estado === status);
+    document.querySelector("#orders-table").innerHTML = visible.length ? visible.map((order) => {
+        const next = { PENDIENTE: "PAGADO", PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO", LISTO: "ENTREGADO" }[order.estado];
+        return `<tr><td data-label="Pedido"><strong>${order.id}</strong></td><td data-label="Fecha">${new Date(order.fecha).toLocaleString("es-BO")}</td><td data-label="Total">${formatMoney(Number(order.total))}</td><td data-label="Estado"><span class="status-badge status-${order.estado.toLowerCase()}">${order.estado.replaceAll("_", " ")}</span></td><td data-label="Acción">${next ? `<button class="table-button" data-advance="${order.id}" data-next="${next}">${next === "PAGADO" ? "Cobrar" : "Avanzar"}</button>` : "-"}</td></tr>`;
+    }).join("") : `<tr><td colspan="5" class="table-empty">Aún no hay pedidos registrados.</td></tr>`;
+}
+
+async function loadAdminProducts() {
+    const list = await requestJson("/api/productos").catch(() => []);
+    const query = document.querySelector("#admin-product-search").value.toLowerCase();
+    document.querySelector("#products-table").innerHTML = list.filter((item) => item.nombre.toLowerCase().includes(query)).map((item) => `<tr><td data-label="Producto"><strong>${item.nombre}</strong><small>${item.descripcion}</small></td><td data-label="Categoría">${item.categoria}</td><td data-label="Precio">${formatMoney(Number(item.precio))}</td><td data-label="Stock">${item.stock}</td><td data-label="Acciones"><button class="table-button" data-toggle-product="${item.id}">Desactivar</button></td></tr>`).join("");
+}
+
+async function loadCategories() {
+    const list = await requestJson("/api/categorias").catch(() => []);
+    document.querySelector("#categories-table").innerHTML = list.map((item) => `<tr><td data-label="Nombre"><strong>${item.nombre}</strong></td><td data-label="Productos">${item.cantidadProductos}</td><td data-label="Acciones"><button class="table-button" data-delete-category="${encodeURIComponent(item.nombre)}">Eliminar</button></td></tr>`).join("");
+}
+
+async function loadInventory() {
+    const list = await requestJson("/api/insumos").catch(() => []);
+    const alerts = list.filter((item) => item.stock <= item.stockMinimo);
+    document.querySelector("#inventory-alert").textContent = alerts.length ? `${alerts.length} insumo(s) necesitan reposición.` : "Inventario saludable: no hay alertas de stock.";
+    document.querySelector("#inventory-table").innerHTML = list.map((item) => `<tr><td data-label="Insumo"><strong>${item.nombre}</strong></td><td data-label="Unidad">${item.unidad}</td><td data-label="Stock actual"><span class="${item.stock <= item.stockMinimo ? "low-stock" : ""}">${item.stock}</span></td><td data-label="Mínimo">${item.stockMinimo}</td><td data-label="Acciones"><button class="table-button" data-buy-supply="${item.id}">Registrar compra</button></td></tr>`).join("");
+}
+
+window.addEventListener("hashchange", updateRoute);
+document.querySelector("#refresh-orders").addEventListener("click", async () => { await loadOrders(); showToast("Lista de pedidos actualizada."); });
+document.querySelector("#order-filters").addEventListener("click", (event) => { const button = event.target.closest("[data-order-status]"); if (button) loadOrders(button.dataset.orderStatus); });
+document.querySelector("#orders-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-advance]"); if (!button) return; try { await requestJson(`/api/pedidos/${button.dataset.advance}/estado`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ estado: button.dataset.next }) }); await loadOrders(); showToast("Estado del pedido actualizado."); } catch (error) { showToast(error.message); } });
+document.querySelector("#admin-product-search").addEventListener("input", loadAdminProducts);
+const productDialog = document.querySelector("#product-dialog");
+const productForm = document.querySelector("#product-form");
+document.querySelector("#new-product").addEventListener("click", () => { productForm.reset(); document.querySelector("#product-error").textContent = ""; productDialog.showModal(); document.querySelector("#product-name").focus(); });
+productForm.addEventListener("submit", async (event) => { if (event.submitter?.value !== "confirm") return; event.preventDefault(); const formData = new FormData(productForm); const nombre = String(formData.get("nombre") || "").trim(); const categoria = String(formData.get("categoria") || "").trim(); const descripcion = String(formData.get("descripcion") || "").trim(); const precio = Number(formData.get("precio")); const stock = Number(formData.get("stock")); const error = document.querySelector("#product-error"); if (nombre.length < 2 || !categoria || !Number.isFinite(precio) || precio < 0 || !Number.isFinite(stock) || stock < 0) { error.textContent = "Completa los campos obligatorios con valores válidos."; return; } const button = document.querySelector("#save-product"); button.disabled = true; try { await requestJson("/api/productos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, categoria, precio, descripcion, stock }) }); await loadAdminProducts(); await loadProducts(); productDialog.close(); showToast("Producto creado correctamente."); } catch (requestError) { error.textContent = requestError.message; } finally { button.disabled = false; } });
+document.querySelector("#products-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-toggle-product]"); if (!button) return; try { await requestJson(`/api/productos/${button.dataset.toggleProduct}`, { method: "DELETE" }); await loadAdminProducts(); await loadProducts(); showToast("Producto desactivado."); } catch (error) { showToast(error.message); } });
+const categoryDialog = document.querySelector("#category-dialog");
+const categoryForm = document.querySelector("#category-form");
+document.querySelector("#new-category").addEventListener("click", () => { categoryForm.reset(); document.querySelector("#category-error").textContent = ""; categoryDialog.showModal(); document.querySelector("#category-name").focus(); });
+categoryForm.addEventListener("submit", async (event) => { if (event.submitter?.value !== "confirm") return; event.preventDefault(); const formData = new FormData(categoryForm); const nombre = String(formData.get("nombre") || "").trim(); const descripcion = String(formData.get("descripcion") || "").trim(); const error = document.querySelector("#category-error"); if (nombre.length < 2) { error.textContent = "El nombre debe tener al menos 2 caracteres."; return; } const button = document.querySelector("#save-category"); button.disabled = true; try { await requestJson("/api/categorias", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, descripcion }) }); await loadCategories(); categoryDialog.close(); showToast("Categoría creada correctamente."); } catch (requestError) { error.textContent = requestError.message; } finally { button.disabled = false; } });
+document.querySelector("#categories-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-delete-category]"); if (!button || !confirm("¿Eliminar esta categoría?")) return; try { await requestJson(`/api/categorias/${button.dataset.deleteCategory}`, { method: "DELETE" }); await loadCategories(); showToast("Categoría eliminada."); } catch (error) { showToast(error.message); } });
+document.querySelector("#new-supply").addEventListener("click", async () => { const nombre = prompt("Nombre del insumo:"); if (!nombre) return; const unidad = prompt("Unidad:", "kg"); const stock = Number(prompt("Stock actual:", "0")); const stockMinimo = Number(prompt("Stock mínimo:", "0")); if (!unidad || !Number.isFinite(stock) || !Number.isFinite(stockMinimo) || stock < 0 || stockMinimo < 0) return showToast("Completa valores de inventario válidos."); try { await requestJson("/api/insumos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, unidad, stock, stockMinimo }) }); await loadInventory(); showToast("Insumo creado correctamente."); } catch (error) { showToast(error.message); } });
+document.querySelector("#inventory-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-buy-supply]"); if (!button) return; const cantidad = Number(prompt("Cantidad comprada:", "1")); if (!Number.isFinite(cantidad) || cantidad <= 0) return showToast("La cantidad debe ser mayor a 0."); try { await requestJson(`/api/insumos/${button.dataset.buySupply}/compra`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cantidad }) }); await loadInventory(); showToast("Compra registrada correctamente."); } catch (error) { showToast(error.message); } });
+
 renderDate();
-renderFilters();
-renderProducts();
 renderCart();
+loadProducts();
+loadTodayStats();
+updateRoute();
