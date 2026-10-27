@@ -5,12 +5,15 @@ let activeCategory = "Todos";
 let orderSequence = 1;
 let todaySales = 0;
 let toastTimeout;
+let currentUser = null;
 
 const categoryFilters = document.querySelector("#category-filters");
 const productGrid = document.querySelector("#product-grid");
 const cartItems = document.querySelector("#cart-items");
 const searchInput = document.querySelector("#search-input");
 const paymentDialog = document.querySelector("#payment-dialog");
+const loginView = document.querySelector("#login-view");
+const appView = document.querySelector("#app-view");
 
 function formatMoney(value) {
     return `Bs ${value.toFixed(2).replace(".", ",")}`;
@@ -24,6 +27,7 @@ async function requestJson(url, options) {
         throw new Error("No se pudo conectar con el servidor. Ejecuta node backend/server.js e inténtalo nuevamente.");
     }
     const data = await response.json().catch(() => null);
+    if (response.status === 401 && currentUser) showLogin("Tu sesión expiró. Inicia sesión nuevamente.");
     if (!response.ok) throw new Error(data?.mensaje || "No se pudo completar la solicitud");
     return data;
 }
@@ -44,6 +48,7 @@ async function loadProducts() {
     try {
         const response = await requestJson("/api/productos");
         products = response.map(mapProduct);
+        document.querySelector("#connection-badge").innerHTML = "<span></span> API CONECTADA";
         renderFilters();
         renderProducts();
     } catch (error) {
@@ -227,6 +232,48 @@ document.addEventListener("keydown", (event) => {
 });
 
 const routeNames = { "/": "Punto de venta", "/pedidos": "Pedidos", "/productos": "Productos", "/categorias": "Categorías", "/inventario": "Inventario" };
+const routesByRole = {
+    ADMIN: Object.keys(routeNames),
+    CASHIER: ["/", "/pedidos"],
+    BARISTA: ["/pedidos"],
+    MENU_STAFF: ["/productos", "/categorias", "/inventario"]
+};
+const roleNames = { ADMIN: "Administrador", MENU_STAFF: "Personal de menú", CASHIER: "Cajero", BARISTA: "Barista" };
+
+function showLogin(message = "") {
+    currentUser = null;
+    appView.hidden = true;
+    loginView.hidden = false;
+    document.querySelector("#login-error").textContent = message;
+    document.querySelector("#login-password").value = "";
+    document.querySelector("#login-email").focus();
+}
+
+function showApp(user) {
+    currentUser = user;
+    loginView.hidden = true;
+    appView.hidden = false;
+    document.querySelector("#user-name").textContent = user.nombre;
+    document.querySelector("#user-role").textContent = roleNames[user.rol];
+    document.querySelector("#user-avatar").textContent = user.nombre
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((part) => part[0].toLocaleUpperCase("es"))
+        .join("");
+
+    const allowedRoutes = routesByRole[user.rol] || [];
+    document.querySelectorAll(".nav-link[data-route]").forEach((link) => {
+        link.hidden = !allowedRoutes.includes(link.dataset.route);
+    });
+    const route = allowedRoutes.includes(currentRoute()) ? currentRoute() : allowedRoutes[0];
+    if (route !== currentRoute()) window.location.hash = `#${route}`;
+    updateRoute();
+    renderDate();
+    renderCart();
+    loadProducts();
+    if (["ADMIN", "CASHIER"].includes(user.rol)) loadTodayStats();
+}
 
 function currentRoute() {
     return window.location.hash.replace(/^#/, "") || "/";
@@ -234,6 +281,10 @@ function currentRoute() {
 
 function updateRoute() {
     const route = routeNames[currentRoute()] ? currentRoute() : "/";
+    if (currentUser && !routesByRole[currentUser.rol]?.includes(route)) {
+        window.location.hash = `#${routesByRole[currentUser.rol]?.[0] || "/"}`;
+        return;
+    }
     document.querySelectorAll("[data-module]").forEach((section) => { section.classList.toggle("visible", section.dataset.module === route.slice(1)); });
     document.querySelector(".pos-layout").hidden = route !== "/";
     document.querySelector(".welcome-row").hidden = route !== "/";
@@ -296,8 +347,52 @@ document.querySelector("#categories-table").addEventListener("click", async (eve
 document.querySelector("#new-supply").addEventListener("click", async () => { const nombre = prompt("Nombre del insumo:"); if (!nombre) return; const unidad = prompt("Unidad:", "kg"); const stock = Number(prompt("Stock actual:", "0")); const stockMinimo = Number(prompt("Stock mínimo:", "0")); if (!unidad || !Number.isFinite(stock) || !Number.isFinite(stockMinimo) || stock < 0 || stockMinimo < 0) return showToast("Completa valores de inventario válidos."); try { await requestJson("/api/insumos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, unidad, stock, stockMinimo }) }); await loadInventory(); showToast("Insumo creado correctamente."); } catch (error) { showToast(error.message); } });
 document.querySelector("#inventory-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-buy-supply]"); if (!button) return; const cantidad = Number(prompt("Cantidad comprada:", "1")); if (!Number.isFinite(cantidad) || cantidad <= 0) return showToast("La cantidad debe ser mayor a 0."); try { await requestJson(`/api/insumos/${button.dataset.buySupply}/compra`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cantidad }) }); await loadInventory(); showToast("Compra registrada correctamente."); } catch (error) { showToast(error.message); } });
 
-renderDate();
-renderCart();
-loadProducts();
-loadTodayStats();
-updateRoute();
+document.querySelector("#login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = document.querySelector("#login-submit");
+    const formData = new FormData(form);
+    const correo = String(formData.get("correo") || "").trim();
+    const password = String(formData.get("password") || "");
+    const errorLabel = document.querySelector("#login-error");
+    errorLabel.textContent = "";
+    button.disabled = true;
+    try {
+        const result = await requestJson("/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ correo, password })
+        });
+        form.reset();
+        showApp(result.usuario);
+    } catch (error) {
+        errorLabel.textContent = error.message;
+    } finally {
+        button.disabled = false;
+    }
+});
+
+document.querySelector("#logout-button").addEventListener("click", async () => {
+    try {
+        const response = await fetch("/api/auth/logout", { method: "POST" });
+        if (!response.ok) {
+            const data = await response.json().catch(() => null);
+            throw new Error(data?.mensaje || "No se pudo cerrar la sesión.");
+        }
+        window.location.hash = "";
+        showLogin();
+    } catch (error) {
+        showLogin(error.message);
+    }
+});
+
+async function restoreSession() {
+    try {
+        const result = await requestJson("/api/auth/session");
+        showApp(result.usuario);
+    } catch (error) {
+        showLogin(error.message === "Inicia sesión para continuar." ? "" : error.message);
+    }
+}
+
+restoreSession();

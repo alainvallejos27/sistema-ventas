@@ -9,7 +9,7 @@
 --  3) Ejecuta la sección 9 para asignar el rol y la sucursal a cada usuario.
 --
 --  Diferencia con un esquema tradicional: las contraseñas las gestiona
---  Supabase Auth (cifradas por Supabase), por eso la tabla "usuarios"
+--  Supabase Auth (almacenadas mediante hash seguro), por eso la tabla "usuarios"
 --  es el PERFIL del usuario y se enlaza con auth.users mediante el id.
 --  Se puede ejecutar varias veces sin errores.
 -- =====================================================================

@@ -13,7 +13,29 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <div class="app-shell">
+  <main class="login-view" id="login-view" aria-labelledby="login-title">
+    <section class="login-card">
+      <a class="brand login-brand" href="/" aria-label="Moka">
+        <span class="brand-mark">m</span>
+        <span class="brand-name">moka<span>.</span></span>
+      </a>
+      <p class="eyebrow">SISTEMA DE VENTAS</p>
+      <h1 id="login-title">Bienvenido<span>.</span></h1>
+      <p class="login-copy">Inicia sesión con la cuenta de personal de Moka.</p>
+      <form id="login-form">
+        <label class="form-field" for="login-email">Correo electrónico
+          <input id="login-email" name="correo" type="email" autocomplete="username" maxlength="254" required placeholder="nombre@correo.com">
+        </label>
+        <label class="form-field" for="login-password">Contraseña
+          <input id="login-password" name="password" type="password" autocomplete="current-password" maxlength="256" required>
+        </label>
+        <p class="login-error" id="login-error" role="alert" aria-live="polite"></p>
+        <button class="checkout-button login-submit" id="login-submit" type="submit"><span>Iniciar sesión</span><span aria-hidden="true">↗</span></button>
+      </form>
+      <p class="login-security">Conexión protegida · Las credenciales se validan con Supabase Auth</p>
+    </section>
+  </main>
+  <div class="app-shell" id="app-view" hidden>
     <aside class="sidebar" aria-label="Navegación principal">
       <a class="brand" href="/" aria-label="Moka, inicio">
         <span class="brand-mark">m</span>
@@ -28,9 +50,9 @@
         <a class="nav-link" href="#/inventario" data-route="/inventario"><span class="nav-icon">05</span><span>Inventario</span></a>
       </nav>
       <div class="sidebar-bottom">
-        <div class="user-avatar">AV</div>
-        <div class="user-meta"><strong>Alain Vallejos</strong><span>Administrador</span></div>
-        <span class="user-menu" aria-hidden="true">···</span>
+        <div class="user-avatar" id="user-avatar">M</div>
+        <div class="user-meta"><strong id="user-name">Usuario</strong><span id="user-role">Personal</span></div>
+        <button class="logout-button" id="logout-button" type="button" aria-label="Cerrar sesión" title="Cerrar sesión">↗</button>
       </div>
     </aside>
 

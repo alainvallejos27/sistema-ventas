@@ -1,5 +1,29 @@
 const express = require("express");
 const router = express.Router();
+const { authenticate, checkSameOrigin, requireRoles } = require("../middleware/auth");
+
+router.use((req, res, next) => {
+    const publicRead = req.method === "GET" && (
+        ["/", "/health", "/categorias", "/productos"].includes(req.path)
+        || /^\/productos\/[^/]+$/.test(req.path)
+    );
+    if (publicRead) return next();
+
+    let roles = ["ADMIN"];
+    if (req.path.startsWith("/categorias") || req.path.startsWith("/productos") || req.path.startsWith("/insumos")) {
+        roles = ["ADMIN", "MENU_STAFF"];
+    } else if (req.path === "/pedidos" && req.method === "GET") {
+        roles = ["ADMIN", "MENU_STAFF", "CASHIER", "BARISTA"];
+    } else if (req.path === "/pedidos" && req.method === "POST") {
+        roles = ["ADMIN", "CASHIER"];
+    } else if (req.path.startsWith("/pedidos/") && req.method === "PATCH") {
+        roles = ["ADMIN", "CASHIER", "BARISTA"];
+    } else if (req.path.startsWith("/ventas") || req.path.startsWith("/reportes")) {
+        roles = ["ADMIN", "CASHIER"];
+    }
+
+    return checkSameOrigin(req, res, () => authenticate(req, res, () => requireRoles(roles)(req, res, next)));
+});
 
 const productos = [
     {
@@ -150,6 +174,10 @@ router.get("/estado", (req, res) => {
         persistencia: "memoria local",
         integracion: "Supabase pendiente"
     });
+});
+
+router.get("/health", (req, res) => {
+    res.status(200).json({ estado: "ok" });
 });
 
 router.get("/categorias", (req, res) => {
@@ -307,30 +335,6 @@ router.delete("/insumos/:id", (req, res) => {
     if (index < 0) return responderError(res, 404, "Insumo no encontrado");
     insumos.splice(index, 1);
     res.status(204).send();
-});
-
-router.post("/auth/login", (req, res) => {
-    const { correo, password } = req.body || {};
-
-    if (!correo || !password) {
-        return responderError(res, 400, "Debe enviar correo y contraseña");
-    }
-
-    const correoNormalizado = String(correo).trim().toLowerCase();
-    const usuario = {
-        id: "demo-user-1",
-        nombre: "Alain Vallejos",
-        correo: correoNormalizado,
-        rol: correoNormalizado.includes("admin") ? "ADMIN" : "CASHIER",
-        token: "demo-token-moka"
-    };
-
-    res.json({
-        ok: true,
-        usuario,
-        mensaje: "Inicio de sesión simulado. La autenticación real se conecta con Supabase.",
-        token: usuario.token
-    });
 });
 
 router.get("/pedidos", (req, res) => {
