@@ -253,8 +253,7 @@ declare
   v_pago  uuid;
 begin
   if not (public.es_staff(array['ADMIN','CASHIER']::public.rol_usuario[])
-          or coalesce(auth.role(), '') = 'service_role'
-          or current_user in ('postgres','supabase_admin')) then
+          or coalesce(auth.role(), '') = 'service_role') then
     raise exception 'No autorizado para registrar pagos';
   end if;
 
@@ -273,6 +272,83 @@ begin
   return v_pago;
 end $$;
 
+-- Crea el pedido y sus detalles en una sola transacción.
+create or replace function public.crear_pedido(p_items jsonb, p_tipo public.tipo_pedido default 'PARA_LLEVAR')
+returns uuid
+language plpgsql security definer set search_path = public as $$
+declare
+  v_pedido uuid;
+  v_sucursal uuid;
+  v_item jsonb;
+  v_variante uuid;
+  v_cantidad integer;
+begin
+  if not coalesce(public.app_rol() in ('ADMIN','CASHIER'), false) then
+    raise exception 'No autorizado para crear pedidos';
+  end if;
+  if p_tipo not in ('PARA_LLEVAR','EN_MESA') then
+    raise exception 'Tipo de pedido no válido';
+  end if;
+  if p_items is null or jsonb_typeof(p_items) <> 'array' then
+    raise exception 'Los productos del pedido deben enviarse como una lista';
+  end if;
+  if jsonb_array_length(p_items) not between 1 and 50 then
+    raise exception 'El pedido debe incluir entre 1 y 50 productos';
+  end if;
+
+  v_sucursal := public.app_sucursal();
+  if v_sucursal is null and public.app_rol() = 'ADMIN' then
+    select id into v_sucursal from public.sucursales where activa order by nombre limit 1;
+  end if;
+  if v_sucursal is null then raise exception 'El perfil no tiene sucursal asignada'; end if;
+
+  insert into public.pedidos (sucursal_id, usuario_id, tipo, estado)
+  values (v_sucursal, auth.uid(), p_tipo, 'PENDIENTE')
+  returning id into v_pedido;
+
+  for v_item in select value from jsonb_array_elements(p_items)
+  loop
+    v_variante := (v_item ->> 'varianteId')::uuid;
+    v_cantidad := (v_item ->> 'cantidad')::integer;
+    if v_cantidad is null or v_cantidad < 1 or v_cantidad > 99 then
+      raise exception 'La cantidad de cada producto debe estar entre 1 y 99';
+    end if;
+    if not exists (
+      select 1 from public.variantes_producto v
+      join public.productos p on p.id = v.producto_id
+      where v.id = v_variante and v.activo and p.activo
+    ) then
+      raise exception 'Una variante no existe o no está activa';
+    end if;
+
+    insert into public.detalle_pedido (pedido_id, variante_id, cantidad)
+    values (v_pedido, v_variante, v_cantidad);
+  end loop;
+
+  return v_pedido;
+end $$;
+
+-- Una sola operación para que el pedido y el pago se confirmen juntos.
+create or replace function public.crear_pedido_y_cobrar(
+  p_items jsonb,
+  p_metodo public.metodo_pago,
+  p_tipo public.tipo_pedido default 'PARA_LLEVAR'
+)
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  v_pedido uuid;
+  v_pago uuid;
+begin
+  if p_metodo not in ('EFECTIVO','QR','TARJETA') then
+    raise exception 'Método de pago no válido';
+  end if;
+
+  v_pedido := public.crear_pedido(p_items, p_tipo);
+  v_pago := public.registrar_pago(v_pedido, p_metodo);
+  return jsonb_build_object('pedido_id', v_pedido, 'pago_id', v_pago);
+end $$;
+
 -- 5.7 Cambiar estado respetando el flujo (barra / caja / admin)
 create or replace function public.cambiar_estado_pedido(p_pedido uuid, p_nuevo public.estado_pedido)
 returns void
@@ -283,9 +359,9 @@ begin
   if v_actual is null then raise exception 'Pedido no encontrado'; end if;
 
   if not (
-       coalesce(auth.role(), '') = 'service_role'
-    or public.app_rol() = 'ADMIN'
-    or (public.app_rol() in ('CASHIER','BARISTA') and public.app_sucursal() = v_suc)
+       coalesce(auth.role() = 'service_role', false)
+    or coalesce(public.app_rol() = 'ADMIN', false)
+    or (coalesce(public.app_rol() in ('CASHIER','BARISTA'), false) and public.app_sucursal() = v_suc)
   ) then
     raise exception 'No autorizado para cambiar el estado de este pedido';
   end if;
@@ -320,8 +396,33 @@ returns void
 language plpgsql as $$
 begin
   if p_cantidad <= 0 then raise exception 'La cantidad debe ser mayor a cero'; end if;
-  update public.insumos set stock = stock + p_cantidad where id = p_insumo;   -- RLS aplica
+  if not coalesce(public.app_rol() in ('ADMIN','MENU_STAFF'), false) then
+    raise exception 'No autorizado para registrar compras de insumos';
+  end if;
+  update public.insumos set stock = stock + p_cantidad where id = p_insumo;
+  if not found then raise exception 'Insumo no encontrado o fuera de la sucursal'; end if;
 end $$;
+
+-- Permisos SQL además de las políticas RLS.
+grant usage on schema public to anon, authenticated;
+grant usage on type public.rol_usuario, public.tipo_pedido, public.estado_pedido, public.metodo_pago to authenticated;
+grant usage on type public.tamano_producto to anon, authenticated;
+grant select on public.sucursales to authenticated;
+grant select on public.usuarios to authenticated;
+grant select on public.categorias, public.productos, public.variantes_producto to anon, authenticated;
+grant select, insert, update, delete on public.categorias, public.productos, public.variantes_producto, public.insumos to authenticated;
+grant select on public.pedidos, public.detalle_pedido, public.pagos to authenticated;
+grant insert on public.pedidos, public.detalle_pedido to authenticated;
+revoke all on function public.crear_pedido(jsonb, public.tipo_pedido) from public, anon;
+revoke all on function public.crear_pedido_y_cobrar(jsonb, public.metodo_pago, public.tipo_pedido) from public, anon;
+revoke all on function public.registrar_pago(uuid, public.metodo_pago) from public, anon;
+revoke all on function public.cambiar_estado_pedido(uuid, public.estado_pedido) from public, anon;
+revoke all on function public.registrar_compra_insumo(uuid, numeric) from public, anon;
+grant execute on function public.crear_pedido(jsonb, public.tipo_pedido) to authenticated;
+grant execute on function public.crear_pedido_y_cobrar(jsonb, public.metodo_pago, public.tipo_pedido) to authenticated;
+grant execute on function public.registrar_pago(uuid, public.metodo_pago) to authenticated;
+grant execute on function public.cambiar_estado_pedido(uuid, public.estado_pedido) to authenticated;
+grant execute on function public.registrar_compra_insumo(uuid, numeric) to authenticated;
 
 -- ---------------------------------------------------------------------
 -- 6. VISTAS (security_invoker: respetan RLS del usuario que consulta)
@@ -346,6 +447,8 @@ select p.sucursal_id, pr.id as producto_id, pr.nombre as producto,
   join public.productos pr         on pr.id = v.producto_id
  where p.estado in ('PAGADO','EN_PREPARACION','LISTO','ENTREGADO')
  group by p.sucursal_id, pr.id, pr.nombre;
+
+grant select on public.vw_insumos_stock_bajo, public.vw_ventas_diarias, public.vw_productos_mas_vendidos to authenticated;
 
 -- ---------------------------------------------------------------------
 -- 7. ROW-LEVEL SECURITY

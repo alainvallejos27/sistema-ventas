@@ -14,9 +14,30 @@ const searchInput = document.querySelector("#search-input");
 const paymentDialog = document.querySelector("#payment-dialog");
 const loginView = document.querySelector("#login-view");
 const appView = document.querySelector("#app-view");
+const selectedVariants = new Map();
 
 function formatMoney(value) {
     return `Bs ${value.toFixed(2).replace(".", ",")}`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+    })[character]);
+}
+
+function safeImageUrl(value) {
+    if (typeof value !== "string" || !value.trim()) return "";
+    try {
+        const url = new URL(value, window.location.origin);
+        return ["https:", "http:"].includes(url.protocol) ? url.href : "";
+    } catch {
+        return "";
+    }
 }
 
 async function requestJson(url, options) {
@@ -33,14 +54,20 @@ async function requestJson(url, options) {
 }
 
 function mapProduct(product) {
+    const variants = (product.variantes || []).map((variant) => ({
+        id: variant.id,
+        size: variant.tamano,
+        price: Number(variant.precio)
+    }));
     return {
-        id: Number(product.id),
+        id: product.id,
         name: product.nombre,
         category: product.categoria,
-        price: Number(product.precio),
-        description: product.descripcion,
-        image: product.imagen,
-        stock: Number(product.stock || 0)
+        price: variants[0]?.price ?? Number(product.precio),
+        description: product.descripcion || "",
+        image: safeImageUrl(product.imagen),
+        variants,
+        stock: product.stock === null ? null : Number(product.stock || 0)
     };
 }
 
@@ -53,7 +80,7 @@ async function loadProducts() {
         renderProducts();
     } catch (error) {
         document.querySelector("#connection-badge").innerHTML = "<span></span> API SIN CONEXION";
-        productGrid.innerHTML = `<p class="empty-results">${error.message}. <button class="text-button" type="button" id="retry-products">Reintentar</button></p>`;
+        productGrid.innerHTML = `<p class="empty-results">${escapeHtml(error.message)}. <button class="text-button" type="button" id="retry-products">Reintentar</button></p>`;
         document.querySelector("#retry-products")?.addEventListener("click", loadProducts);
     }
 }
@@ -62,7 +89,7 @@ async function loadTodayStats() {
     try {
         const report = await requestJson("/api/reportes/ventas-dia");
         document.querySelector("#sales-total").textContent = formatMoney(Number(report.total || 0));
-        document.querySelector("#orders-count").textContent = String(report.ventas?.length || 0);
+        document.querySelector("#orders-count").textContent = String(report.pedidos || 0);
         document.querySelector("#connection-badge").innerHTML = "<span></span> API CONECTADA";
     } catch {
         document.querySelector("#connection-badge").innerHTML = "<span></span> API SIN CONEXION";
@@ -83,8 +110,8 @@ function renderDate() {
 function renderFilters() {
     const categories = ["Todos", ...new Set(products.map((product) => product.category))];
     categoryFilters.innerHTML = categories.map((category) => `
-        <button class="filter-button ${category === activeCategory ? "selected" : ""}" type="button" data-category="${category}" aria-pressed="${category === activeCategory}">
-            ${category}
+        <button class="filter-button ${category === activeCategory ? "selected" : ""}" type="button" data-category="${escapeHtml(category)}" aria-pressed="${category === activeCategory}">
+            ${escapeHtml(category)}
         </button>
     `).join("");
 }
@@ -101,13 +128,14 @@ function renderProducts() {
         ? visibleProducts.map((product) => `
             <article class="product-card">
                 <div class="product-image">
-                    <img src="${product.image}" alt="${product.name}" loading="lazy">
-                    <span class="product-category">${product.category}</span>
+                    ${product.image ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" loading="lazy">` : ""}
+                    <span class="product-category">${escapeHtml(product.category)}</span>
                 </div>
                 <div class="product-info">
-                    <div class="product-name-row"><h3 class="product-name">${product.name}</h3><span class="product-price">Bs ${product.price}</span></div>
-                    <p class="product-description">${product.description}</p>
-                    <button class="add-button" type="button" data-add="${product.id}"><span>Agregar al pedido</span><span aria-hidden="true">+</span></button>
+                    <div class="product-name-row"><h3 class="product-name">${escapeHtml(product.name)}</h3><span class="product-price" data-price-for="${escapeHtml(product.id)}">Bs ${product.price}</span></div>
+                    <p class="product-description">${escapeHtml(product.description)}</p>
+                    ${product.variants.length > 1 ? `<label class="variant-picker">Tamaño<select data-variant-for="${escapeHtml(product.id)}">${product.variants.map((variant) => `<option value="${escapeHtml(variant.id)}" data-price="${variant.price}" ${variant.id === (selectedVariants.get(product.id) || product.variants[0].id) ? "selected" : ""}>${escapeHtml(variant.size)} · Bs ${variant.price}</option>`).join("")}</select></label>` : ""}
+                    <button class="add-button" type="button" data-add="${escapeHtml(product.id)}" ${product.variants.length ? "" : "disabled"}><span>${product.variants.length ? "Agregar al pedido" : "No disponible"}</span><span aria-hidden="true">+</span></button>
                 </div>
             </article>
         `).join("")
@@ -117,20 +145,20 @@ function renderProducts() {
 function renderCart() {
     const entries = [...cart.values()];
     const count = entries.reduce((total, item) => total + item.quantity, 0);
-    const total = entries.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+    const total = entries.reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
 
-    cartItems.innerHTML = entries.length ? entries.map(({ product, quantity }) => `
+    cartItems.innerHTML = entries.length ? entries.map(({ product, variant, quantity }) => `
         <div class="cart-row">
             <div>
-                <p class="cart-product-name">${product.name}</p>
-                <span class="cart-product-meta">${formatMoney(product.price)} c/u</span>
+                <p class="cart-product-name">${escapeHtml(product.name)}${variant.size !== "UNICO" ? ` · ${escapeHtml(variant.size)}` : ""}</p>
+                <span class="cart-product-meta">${formatMoney(variant.price)} c/u</span>
                 <div class="quantity-control" aria-label="Cantidad de ${product.name}">
-                    <button type="button" data-quantity="${product.id}" data-change="-1" aria-label="Quitar una unidad de ${product.name}">−</button>
+                    <button type="button" data-quantity="${escapeHtml(variant.id)}" data-change="-1" aria-label="Quitar una unidad de ${escapeHtml(product.name)}">−</button>
                     <span>${quantity}</span>
-                    <button type="button" data-quantity="${product.id}" data-change="1" aria-label="Agregar una unidad de ${product.name}">+</button>
+                    <button type="button" data-quantity="${escapeHtml(variant.id)}" data-change="1" aria-label="Agregar una unidad de ${escapeHtml(product.name)}">+</button>
                 </div>
             </div>
-            <strong class="cart-product-total">${formatMoney(product.price * quantity)}</strong>
+            <strong class="cart-product-total">${formatMoney(variant.price * quantity)}</strong>
         </div>
     `).join("") : `
         <div class="empty-cart"><span class="empty-mark">+</span><p>Tu pedido empieza aqui</p><span>Elige algo del menu</span></div>
@@ -165,16 +193,29 @@ searchInput.addEventListener("input", renderProducts);
 productGrid.addEventListener("click", (event) => {
     const button = event.target.closest("[data-add]");
     if (!button) return;
-    const product = products.find((item) => item.id === Number(button.dataset.add));
-    const current = cart.get(product.id);
-    cart.set(product.id, { product, quantity: (current?.quantity || 0) + 1 });
+    const product = products.find((item) => item.id === button.dataset.add);
+    const selectedVariantId = selectedVariants.get(product.id) || product.variants[0]?.id;
+    const variant = product.variants.find((item) => item.id === selectedVariantId);
+    if (!variant) return showToast("Este producto no tiene una variante disponible.");
+    const current = cart.get(variant.id);
+    cart.set(variant.id, { product, variant, quantity: (current?.quantity || 0) + 1 });
     renderCart();
+});
+
+productGrid.addEventListener("change", (event) => {
+    const select = event.target.closest("[data-variant-for]");
+    if (!select) return;
+    const productId = select.dataset.variantFor;
+    selectedVariants.set(productId, select.value);
+    const price = Number(select.selectedOptions[0]?.dataset.price);
+    const priceLabel = productGrid.querySelector(`[data-price-for="${CSS.escape(productId)}"]`);
+    if (priceLabel && Number.isFinite(price)) priceLabel.textContent = `Bs ${price}`;
 });
 
 cartItems.addEventListener("click", (event) => {
     const button = event.target.closest("[data-quantity]");
     if (!button) return;
-    const id = Number(button.dataset.quantity);
+    const id = button.dataset.quantity;
     const entry = cart.get(id);
     const quantity = entry.quantity + Number(button.dataset.change);
     if (quantity <= 0) cart.delete(id);
@@ -192,31 +233,28 @@ document.querySelector("#checkout-button").addEventListener("click", () => payme
 document.querySelector("#payment-form").addEventListener("submit", async (event) => {
     if (event.submitter?.value !== "confirm") return;
     event.preventDefault();
-    const total = [...cart.values()].reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+    const total = [...cart.values()].reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
     const paymentMethod = new FormData(event.currentTarget).get("payment");
-    const items = [...cart.values()].map(({ product, quantity }) => ({ productoId: product.id, cantidad: quantity }));
+    const items = [...cart.values()].map(({ variant, quantity }) => ({ varianteId: variant.id, cantidad: quantity }));
     const confirmButton = document.querySelector("#confirm-payment");
     confirmButton.disabled = true;
     try {
-        const pedido = await requestJson("/api/pedidos", {
+        const result = await requestJson("/api/ventas", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ items })
+            body: JSON.stringify({ metodo: paymentMethod, items })
         });
-        await requestJson("/api/ventas", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pedidoId: pedido.id, metodo: paymentMethod, items, total })
-        });
-        todaySales += total;
+        const paidTotal = Number(result.venta.monto);
+        todaySales += paidTotal;
         orderSequence += 1;
         document.querySelector("#sales-total").textContent = formatMoney(todaySales);
         document.querySelector("#orders-count").textContent = String(orderSequence - 1);
         document.querySelector("#preparing-count").innerHTML = `${orderSequence - 1} <small>pedidos</small>`;
         cart.clear();
         renderCart();
+        document.querySelector("#order-number").textContent = `#${result.pedido.id.slice(-6).toUpperCase()}`;
         paymentDialog.close();
-        showToast(`Cobro de ${formatMoney(total)} registrado como ${paymentMethod}.`);
+        showToast(`Cobro de ${formatMoney(paidTotal)} registrado como ${paymentMethod}.`);
     } catch (error) {
         showToast(error.message);
     } finally {
@@ -303,41 +341,131 @@ function updateRoute() {
 }
 
 async function loadOrders(status = "TODOS") {
-    const orders = await requestJson("/api/pedidos").catch(() => []);
-    const visible = status === "TODOS" ? orders : orders.filter((order) => order.estado === status);
-    document.querySelector("#orders-table").innerHTML = visible.length ? visible.map((order) => {
-        const next = { PENDIENTE: "PAGADO", PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO", LISTO: "ENTREGADO" }[order.estado];
-        return `<tr><td data-label="Pedido"><strong>${order.id}</strong></td><td data-label="Fecha">${new Date(order.fecha).toLocaleString("es-BO")}</td><td data-label="Total">${formatMoney(Number(order.total))}</td><td data-label="Estado"><span class="status-badge status-${order.estado.toLowerCase()}">${order.estado.replaceAll("_", " ")}</span></td><td data-label="Acción">${next ? `<button class="table-button" data-advance="${order.id}" data-next="${next}">${next === "PAGADO" ? "Cobrar" : "Avanzar"}</button>` : "-"}</td></tr>`;
-    }).join("") : `<tr><td colspan="5" class="table-empty">Aún no hay pedidos registrados.</td></tr>`;
+    try {
+        const query = status === "TODOS" ? "" : `?estado=${encodeURIComponent(status)}`;
+        const orders = await requestJson(`/api/pedidos${query}`);
+        document.querySelector("#orders-table").innerHTML = orders.length ? orders.map((order) => {
+            const next = { PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO", LISTO: "ENTREGADO" }[order.estado];
+            const action = order.estado === "PENDIENTE"
+                ? `<button class="table-button" data-pay="${escapeHtml(order.id)}">Cobrar en efectivo</button>`
+                : next
+                    ? `<button class="table-button" data-advance="${escapeHtml(order.id)}" data-next="${next}">Avanzar</button>`
+                    : "-";
+            return `<tr><td data-label="Pedido"><strong>${escapeHtml(order.id)}</strong></td><td data-label="Fecha">${new Date(order.fecha).toLocaleString("es-BO")}</td><td data-label="Total">${formatMoney(Number(order.total))}</td><td data-label="Estado"><span class="status-badge status-${escapeHtml(order.estado.toLowerCase())}">${escapeHtml(order.estado.replaceAll("_", " "))}</span></td><td data-label="Acción">${action}</td></tr>`;
+        }).join("") : `<tr><td colspan="5" class="table-empty">Aún no hay pedidos registrados.</td></tr>`;
+    } catch (error) {
+        document.querySelector("#orders-table").innerHTML = `<tr><td colspan="5" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
+    }
 }
 
 async function loadAdminProducts() {
-    const list = await requestJson("/api/productos").catch(() => []);
-    const query = document.querySelector("#admin-product-search").value.toLowerCase();
-    document.querySelector("#products-table").innerHTML = list.filter((item) => item.nombre.toLowerCase().includes(query)).map((item) => `<tr><td data-label="Producto"><strong>${item.nombre}</strong><small>${item.descripcion}</small></td><td data-label="Categoría">${item.categoria}</td><td data-label="Precio">${formatMoney(Number(item.precio))}</td><td data-label="Stock">${item.stock}</td><td data-label="Acciones"><button class="table-button" data-toggle-product="${item.id}">Desactivar</button></td></tr>`).join("");
+    try {
+        const list = await requestJson("/api/productos");
+        const query = document.querySelector("#admin-product-search").value.toLowerCase();
+        const visible = list.filter((item) => item.nombre.toLowerCase().includes(query));
+        document.querySelector("#products-table").innerHTML = visible.length
+            ? visible.map((item) => `<tr><td data-label="Producto"><strong>${escapeHtml(item.nombre)}</strong><small>${escapeHtml(item.descripcion)}</small></td><td data-label="Categoría">${escapeHtml(item.categoria)}</td><td data-label="Precio">${formatMoney(Number(item.precio))}</td><td data-label="Existencias">Gestionadas por insumos</td><td data-label="Acciones"><button class="table-button" data-toggle-product="${escapeHtml(item.id)}">Desactivar</button></td></tr>`).join("")
+            : `<tr><td colspan="5" class="table-empty">No se encontraron productos.</td></tr>`;
+    } catch (error) {
+        document.querySelector("#products-table").innerHTML = `<tr><td colspan="5" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
+    }
 }
 
 async function loadCategories() {
-    const list = await requestJson("/api/categorias").catch(() => []);
-    document.querySelector("#categories-table").innerHTML = list.map((item) => `<tr><td data-label="Nombre"><strong>${item.nombre}</strong></td><td data-label="Productos">${item.cantidadProductos}</td><td data-label="Acciones"><button class="table-button" data-delete-category="${encodeURIComponent(item.nombre)}">Eliminar</button></td></tr>`).join("");
+    try {
+        const list = await requestJson("/api/categorias");
+        document.querySelector("#categories-table").innerHTML = list.length
+            ? list.map((item) => `<tr><td data-label="Nombre"><strong>${escapeHtml(item.nombre)}</strong></td><td data-label="Productos">${item.cantidadProductos}</td><td data-label="Acciones"><button class="table-button" data-delete-category="${encodeURIComponent(item.nombre)}">Eliminar</button></td></tr>`).join("")
+            : `<tr><td colspan="3" class="table-empty">No hay categorías registradas.</td></tr>`;
+    } catch (error) {
+        document.querySelector("#categories-table").innerHTML = `<tr><td colspan="3" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
+    }
 }
 
 async function loadInventory() {
-    const list = await requestJson("/api/insumos").catch(() => []);
-    const alerts = list.filter((item) => item.stock <= item.stockMinimo);
-    document.querySelector("#inventory-alert").textContent = alerts.length ? `${alerts.length} insumo(s) necesitan reposición.` : "Inventario saludable: no hay alertas de stock.";
-    document.querySelector("#inventory-table").innerHTML = list.map((item) => `<tr><td data-label="Insumo"><strong>${item.nombre}</strong></td><td data-label="Unidad">${item.unidad}</td><td data-label="Stock actual"><span class="${item.stock <= item.stockMinimo ? "low-stock" : ""}">${item.stock}</span></td><td data-label="Mínimo">${item.stockMinimo}</td><td data-label="Acciones"><button class="table-button" data-buy-supply="${item.id}">Registrar compra</button></td></tr>`).join("");
+    try {
+        const list = await requestJson("/api/insumos");
+        const alerts = list.filter((item) => item.stock <= item.stockMinimo);
+        document.querySelector("#inventory-alert").textContent = alerts.length ? `${alerts.length} insumo(s) necesitan reposición.` : "Inventario saludable: no hay alertas de stock.";
+        document.querySelector("#inventory-table").innerHTML = list.length
+            ? list.map((item) => `<tr><td data-label="Insumo"><strong>${escapeHtml(item.nombre)}</strong></td><td data-label="Unidad">${escapeHtml(item.unidad)}</td><td data-label="Stock actual"><span class="${item.stock <= item.stockMinimo ? "low-stock" : ""}">${item.stock}</span></td><td data-label="Mínimo">${item.stockMinimo}</td><td data-label="Acciones"><button class="table-button" data-buy-supply="${escapeHtml(item.id)}">Registrar compra</button></td></tr>`).join("")
+            : `<tr><td colspan="5" class="table-empty">No hay insumos registrados.</td></tr>`;
+    } catch (error) {
+        document.querySelector("#inventory-alert").textContent = error.message;
+        document.querySelector("#inventory-table").innerHTML = `<tr><td colspan="5" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
+    }
 }
 
 window.addEventListener("hashchange", updateRoute);
 document.querySelector("#refresh-orders").addEventListener("click", async () => { await loadOrders(); showToast("Lista de pedidos actualizada."); });
 document.querySelector("#order-filters").addEventListener("click", (event) => { const button = event.target.closest("[data-order-status]"); if (button) loadOrders(button.dataset.orderStatus); });
-document.querySelector("#orders-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-advance]"); if (!button) return; try { await requestJson(`/api/pedidos/${button.dataset.advance}/estado`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ estado: button.dataset.next }) }); await loadOrders(); showToast("Estado del pedido actualizado."); } catch (error) { showToast(error.message); } });
+document.querySelector("#orders-table").addEventListener("click", async (event) => {
+    const payButton = event.target.closest("[data-pay]");
+    const advanceButton = event.target.closest("[data-advance]");
+    if (!payButton && !advanceButton) return;
+    const button = payButton || advanceButton;
+    button.disabled = true;
+    try {
+        if (payButton) {
+            if (!confirm("¿Confirmas que recibiste el pago en efectivo de este pedido?")) {
+                button.disabled = false;
+                return;
+            }
+            const result = await requestJson("/api/ventas", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pedidoId: payButton.dataset.pay, metodo: "EFECTIVO" })
+            });
+            showToast(`Pago en efectivo registrado: ${formatMoney(Number(result.venta.monto))}.`);
+        } else {
+            await requestJson(`/api/pedidos/${advanceButton.dataset.advance}/estado`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ estado: advanceButton.dataset.next })
+            });
+            showToast("Estado del pedido actualizado.");
+        }
+        await loadOrders();
+    } catch (error) {
+        button.disabled = false;
+        showToast(error.message);
+    }
+});
 document.querySelector("#admin-product-search").addEventListener("input", loadAdminProducts);
 const productDialog = document.querySelector("#product-dialog");
 const productForm = document.querySelector("#product-form");
 document.querySelector("#new-product").addEventListener("click", () => { productForm.reset(); document.querySelector("#product-error").textContent = ""; productDialog.showModal(); document.querySelector("#product-name").focus(); });
-productForm.addEventListener("submit", async (event) => { if (event.submitter?.value !== "confirm") return; event.preventDefault(); const formData = new FormData(productForm); const nombre = String(formData.get("nombre") || "").trim(); const categoria = String(formData.get("categoria") || "").trim(); const descripcion = String(formData.get("descripcion") || "").trim(); const precio = Number(formData.get("precio")); const stock = Number(formData.get("stock")); const error = document.querySelector("#product-error"); if (nombre.length < 2 || !categoria || !Number.isFinite(precio) || precio < 0 || !Number.isFinite(stock) || stock < 0) { error.textContent = "Completa los campos obligatorios con valores válidos."; return; } const button = document.querySelector("#save-product"); button.disabled = true; try { await requestJson("/api/productos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, categoria, precio, descripcion, stock }) }); await loadAdminProducts(); await loadProducts(); productDialog.close(); showToast("Producto creado correctamente."); } catch (requestError) { error.textContent = requestError.message; } finally { button.disabled = false; } });
+productForm.addEventListener("submit", async (event) => {
+    if (event.submitter?.value !== "confirm") return;
+    event.preventDefault();
+    const formData = new FormData(productForm);
+    const nombre = String(formData.get("nombre") || "").trim();
+    const categoria = String(formData.get("categoria") || "").trim();
+    const descripcion = String(formData.get("descripcion") || "").trim();
+    const precio = Number(formData.get("precio"));
+    const error = document.querySelector("#product-error");
+    if (nombre.length < 2 || !categoria || !Number.isFinite(precio) || precio < 0) {
+        error.textContent = "Completa los campos obligatorios con valores válidos.";
+        return;
+    }
+    const button = document.querySelector("#save-product");
+    button.disabled = true;
+    try {
+        await requestJson("/api/productos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ nombre, categoria, precio, descripcion })
+        });
+        await loadAdminProducts();
+        await loadProducts();
+        productDialog.close();
+        showToast("Producto creado correctamente.");
+    } catch (requestError) {
+        error.textContent = requestError.message;
+    } finally {
+        button.disabled = false;
+    }
+});
 document.querySelector("#products-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-toggle-product]"); if (!button) return; try { await requestJson(`/api/productos/${button.dataset.toggleProduct}`, { method: "DELETE" }); await loadAdminProducts(); await loadProducts(); showToast("Producto desactivado."); } catch (error) { showToast(error.message); } });
 const categoryDialog = document.querySelector("#category-dialog");
 const categoryForm = document.querySelector("#category-form");

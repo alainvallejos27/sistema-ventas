@@ -25,6 +25,8 @@ router.use((req, res, next) => {
     return checkSameOrigin(req, res, () => authenticate(req, res, () => requireRoles(roles)(req, res, next)));
 });
 
+router.use(require("./supabaseRoutes"));
+
 const productos = [
     {
         id: 1,
@@ -171,8 +173,8 @@ router.get("/estado", (req, res) => {
         sistema: "Moka",
         estado: "funcionando",
         servidor: "Node.js + Express",
-        persistencia: "memoria local",
-        integracion: "Supabase pendiente"
+        persistencia: "Supabase PostgreSQL",
+        integracion: "Supabase"
     });
 });
 

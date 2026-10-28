@@ -104,6 +104,8 @@ h2 { margin: 0; font: 500 23px/1.2 var(--serif); letter-spacing: 0; }
 .product-name { margin: 0; font-size: 12px; font-weight: 700; }
 .product-price { flex: 0 0 auto; color: var(--green); font-size: 11px; font-weight: 700; }
 .product-description { min-height: 28px; margin: 5px 0 10px; color: #898d85; font-size: 9px; line-height: 1.45; }
+.variant-picker { display: grid; gap: 5px; margin: 8px 0; color: #858980; font-size: 9px; }
+.variant-picker select { width: 100%; padding: 7px; border: 1px solid #dedfd6; border-radius: 4px; background: white; color: var(--ink); font-size: 10px; }
 .add-button { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 7px 9px; border: 1px solid #dfe4da; border-radius: 3px; background: #f3f6ef; color: var(--green-dark); font-size: 10px; font-weight: 700; transition: background .15s ease; }
 .add-button:hover { background: #e4eee1; }
 .add-button span:last-child { font-size: 16px; line-height: 10px; }

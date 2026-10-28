@@ -97,7 +97,7 @@
               <div class="totals-line"><span>Subtotal</span><strong id="subtotal">Bs 0,00</strong></div>
               <div class="totals-line total-line"><span>Total</span><strong id="total">Bs 0,00</strong></div>
               <button class="checkout-button" id="checkout-button" type="button" disabled><span>Cobrar pedido</span><span aria-hidden="true">↗</span></button>
-              <p class="secure-note"><span>●</span> El cobro se simula en esta demostracion</p>
+              <p class="secure-note"><span>●</span> Confirma manualmente que recibiste el efectivo, QR o pago con tarjeta</p>
             </div>
           </aside>
         </div>
@@ -118,8 +118,8 @@
           <div class="module-heading"><div><p class="eyebrow">OPERACIONES <span>·</span> ABASTECIMIENTO</p><h2 id="inventario-title">Inventario</h2><p class="module-copy">Revisa existencias y registra compras de insumos.</p></div><button class="checkout-button module-action" type="button" id="new-supply">+ Nuevo insumo</button></div>
           <div class="inventory-alert" id="inventory-alert"></div><div class="table-shell"><table class="data-table"><thead><tr><th>Insumo</th><th>Unidad</th><th>Stock actual</th><th>Mínimo</th><th>Acciones</th></tr></thead><tbody id="inventory-table"></tbody></table></div>
         </section>
-        <footer class="page-footer"><span>MOKA <b>·</b> SISTEMA DE VENTAS</span><span>TECNOLOGIA WEB II <b>·</b> 2026</span></footer>
-      </div>
+        <footer class="page-footer"><span>MOKA <b>·</b> SISTEMA DE VENTAS</span>
+
     </main>
   </div>
 
@@ -127,7 +127,7 @@
     <form method="dialog" id="payment-form">
       <div class="dialog-top"><span class="dialog-kicker">CIERRE DE PEDIDO</span><button class="close-button" value="cancel" aria-label="Cerrar">×</button></div>
       <h2 id="payment-title">¿Cómo paga el cliente?</h2>
-      <p class="dialog-copy">Selecciona el método para registrar el pedido en el sistema.</p>
+      <p class="dialog-copy">El sistema registra el método y el total. Confirma el pago en efectivo, QR o terminal antes de continuar.</p>
       <div class="payment-options">
         <label><input type="radio" name="payment" value="EFECTIVO" checked><span><b>Efectivo</b><small>Pago en caja</small></span></label>
         <label><input type="radio" name="payment" value="QR"><span><b>QR</b><small>Transferencia</small></span></label>
@@ -157,10 +157,8 @@
         <label class="form-field" for="product-category">Categoría<span>*</span><input id="product-category" name="categoria" required placeholder="Ej. Cafés"></label>
       </div>
       <label class="form-field" for="product-description">Descripción<input id="product-description" name="descripcion" maxlength="300" placeholder="Describe el producto"></label>
-      <div class="form-grid">
-        <label class="form-field" for="product-price">Precio (Bs)<span>*</span><input id="product-price" name="precio" type="number" min="0" step="0.01" required placeholder="0.00"></label>
-        <label class="form-field" for="product-stock">Stock inicial<span>*</span><input id="product-stock" name="stock" type="number" min="0" step="1" required placeholder="0"></label>
-      </div>
+      <label class="form-field" for="product-price">Precio (Bs)<span>*</span><input id="product-price" name="precio" type="number" min="0" step="0.01" required placeholder="0.00"></label>
+      <p class="dialog-copy">El inventario se controla por insumos, no por existencias de productos terminados.</p>
       <small class="form-error" id="product-error" role="alert"></small>
       <div class="dialog-actions"><button class="filter-button" value="cancel">Cancelar</button><button class="checkout-button" id="save-product" value="confirm">Guardar producto</button></div>
     </form>

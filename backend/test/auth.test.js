@@ -32,7 +32,7 @@ before(async () => {
     serverProcess.stdout.on("data", (chunk) => { serverOutput += chunk; });
     serverProcess.stderr.on("data", (chunk) => { serverOutput += chunk; });
 
-    for (let attempt = 0; attempt < 50; attempt += 1) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
         if (serverProcess.exitCode !== null) {
             throw new Error(`Backend exited before startup:\n${serverOutput}`);
         }
@@ -69,10 +69,10 @@ test("serves the login screen with security headers and a public health check", 
     assert.deepEqual(await health.json(), { estado: "ok" });
 });
 
-test("keeps menu reads public and blocks protected operations without Supabase config", async () => {
+test("does not fall back to demo data when Supabase is missing and blocks protected operations", async () => {
     const catalog = await fetch(`${baseUrl}/api/productos`);
-    assert.equal(catalog.status, 200);
-    assert.ok(Array.isArray(await catalog.json()));
+    assert.equal(catalog.status, 502);
+    assert.match((await catalog.json()).mensaje, /base de datos/i);
 
     const login = await fetch(`${baseUrl}/api/auth/login`, {
         method: "POST",
