@@ -4,6 +4,9 @@
   "private": true,
   "description": "API inicial para el sistema de ventas de la Cafeteria Moka",
   "main": "server.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "start": "node server.js",
     "test": "node --test"

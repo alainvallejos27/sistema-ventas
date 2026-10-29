@@ -7,6 +7,10 @@ if (process.env.NODE_ENV !== "test") {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+if (process.env.TRUST_PROXY === "1") {
+    app.set("trust proxy", 1);
+}
+
 const apiRoutes = require("./routes/apiRoutes");
 const authRoutes = require("./routes/authRoutes");
 
