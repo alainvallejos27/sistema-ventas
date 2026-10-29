@@ -1,6 +1,6 @@
 # Moka | Sistema de ventas para cafetería
 
-Aplicación web académica para organizar productos, pedidos y ventas de la cafetería ficticia Moka, en Cochabamba. El inicio de sesión usa Supabase Auth y los perfiles/roles del esquema; los productos, pedidos e inventario de la interfaz siguen siendo datos de demostración en memoria.
+Aplicación web académica para organizar productos, pedidos y ventas de la cafetería ficticia Moka, en Cochabamba. El inicio de sesión usa Supabase Auth y el catálogo, pedidos, pagos e inventario se leen y guardan en Supabase.
 
 ## Objetivo
 
@@ -92,10 +92,10 @@ Rutas base disponibles:
 | POST | `/api/auth/login` | Valida credenciales con Supabase Auth y crea una sesión segura. |
 | GET | `/api/auth/session` | Consulta el perfil asociado a la sesión actual. |
 | POST | `/api/auth/logout` | Invalida la sesión y elimina sus cookies. |
-| GET | `/api/productos` | Catálogo de demostración de Moka (datos estáticos). |
-| GET | `/api/productos/:id` | Busca un producto en el catálogo de demostración. |
+| GET | `/api/productos` | Catálogo de productos y variantes cargado desde Supabase. |
+| GET | `/api/productos/:id` | Busca un producto persistido en Supabase. |
 
-El catálogo actual es solo de ejemplo y no guarda cambios. La autenticación se conecta a Supabase; pedidos, pagos, reportes e inventario siguen en memoria y no deben usarse como persistencia de producción.
+Los productos, categorías, pedidos, pagos, reportes e inventario se leen y guardan en Supabase. Los cobros con QR/tarjeta aún requieren confirmación manual; no existe conexión a una pasarela bancaria.
 
 Para ejecutar las pruebas de autenticación y seguridad desde `backend`:
 
@@ -125,7 +125,20 @@ docker compose down
 
 La imagen usa Node.js 22 Alpine, instala las dependencias de producción con `npm ci`, ejecuta el proceso como el usuario sin privilegios `node`, cierra ordenadamente las conexiones HTTP al detenerse y comprueba su estado mediante `/api/health`. Compose añade un sistema de archivos raíz de solo lectura, elimina capacidades de Linux y desactiva la escalada de privilegios. No publiques el archivo `.env` ni uses una clave `service_role`.
 
-**Límite de la versión actual:** los datos de productos, pedidos e inventario son de demostración y se guardan en memoria del proceso; no hay persistencia conectada. Reiniciar o recrear el contenedor restablece esos datos. La autenticación sí depende de Supabase y necesita conectividad saliente.
+La autenticación y los datos del sistema requieren conexión saliente a Supabase. Los pedidos y sus cobros se crean juntos en una sola transacción y usan el precio de cada variante almacenado en la base.
+
+## Desplegar en Render
+
+El archivo [`render.yaml`](render.yaml) define el servicio web de Node.js: usa `backend` como directorio raíz, ejecuta `npm ci` y `npm start`, y comprueba la disponibilidad en `/api/health`.
+
+1. Confirma que el código esté subido a GitHub y que el SQL actualizado de [`backend/database/moka_supabase.sql`](backend/database/moka_supabase.sql) ya se haya ejecutado en Supabase.
+2. En Render, selecciona **New → Blueprint** e importa el repositorio `alainvallejos27/sistema-ventas`. Render leerá el archivo `render.yaml` y mostrará el servicio `moka-sistema-ventas` para crearlo.
+3. Cuando Render solicite los valores secretos, introduce `SUPABASE_URL` y `SUPABASE_ANON_KEY` de tu proyecto Supabase. Usa solo la clave pública `anon`/publishable, nunca `service_role`.
+4. Aplica el Blueprint y espera a que termine el despliegue. Render instalará las dependencias, iniciará Express y asignará un dominio `onrender.com`.
+5. Comprueba que el dominio abra la pantalla de inicio de sesión y que `https://TU-DOMINIO/api/health` responda `{"estado":"ok"}`. Después prueba con una cuenta de personal activa en Supabase.
+6. En **Supabase → Authentication → URL Configuration**, configura el dominio de Render como **Site URL** si tu flujo de autenticación lo requiere.
+
+Render puede desplegar automáticamente los cambios que subas a la rama conectada. El plan gratuito puede suspender el servicio tras un período sin actividad, por lo que la primera solicitud posterior podría tardar en responder. Las variables secretas se administran en Render y deben mantenerse fuera del repositorio.
 
 ## Preparar Supabase
 
@@ -136,6 +149,8 @@ La imagen usa Node.js 22 Alpine, instala las dependencias de producción con `np
 5. Editar la sección 10 del SQL para asignar los correos y roles reales (`ADMIN`, `MENU_STAFF`, `CASHIER` y `BARISTA`), y ejecutar esas sentencias después de crear los usuarios.
 6. Copiar `backend/.env.example` a `backend/.env` y configurar `SUPABASE_URL` y `SUPABASE_ANON_KEY` con los datos del proyecto. La aplicación usa la clave pública `anon`/publishable; nunca necesita la clave `service_role`. Si ya existe una variable `SUPABASE_KEY`, confirma en Supabase que sea la clave pública antes de asignarla a `SUPABASE_ANON_KEY`; no reutilices una clave `service_role`.
 7. En producción, servir la aplicación únicamente por HTTPS para que las cookies de sesión lleven el atributo `Secure`.
+
+Si ya aplicaste una versión anterior del SQL, vuelve a ejecutar el archivo actualizado para instalar las funciones transaccionales y los permisos usados por los nuevos endpoints. Después reinicia el backend.
 
 El script crea sucursal y catálogo inicial, perfiles enlazados a Supabase Auth, variantes de producto, insumos, pedidos, detalles y pagos. También configura roles, políticas RLS, funciones transaccionales, vistas de reportes, buckets de Storage y publicación Realtime. Es un SQL pensado para Supabase, no para ejecutarse en una instalación PostgreSQL genérica.
 
@@ -149,7 +164,8 @@ El script crea sucursal y catálogo inicial, perfiles enlazados a Supabase Auth,
 - Roles de acceso del personal: `ADMIN`, `MENU_STAFF`, `CASHIER` y `BARISTA`; un perfil inactivo o `CUSTOMER` no puede entrar al punto de venta.
 - El precio de cada línea se toma de la variante activa en la base de datos, no del valor enviado por el cliente.
 - El total del pedido se recalcula desde sus detalles.
-- El pago bloquea el pedido durante el cobro para prevenir doble registro.
+- El pago bloquea el pedido durante el cobro para prevenir doble registro. La creación del pedido y su primer cobro desde Caja se guardan en una única transacción.
+- QR y tarjeta se registran como confirmados por el cajero después de verificar el pago; todavía no hay conexión con bancos ni pasarelas de pago.
 - Los cambios de estado se validan contra el flujo permitido.
 - RLS separa permisos por rol y sucursal.
 
@@ -157,7 +173,7 @@ La cancelación automática a los 10 minutos requiere habilitar `pg_cron` y acti
 
 ## API REST e integraciones pendientes
 
-El login ya está implementado con Supabase Auth. Las operaciones de catálogo, pedidos, pagos, reportes e inventario indicadas aquí usan datos de demostración en memoria y todavía no están conectadas a PostgreSQL:
+El login, catálogo, categorías, pedidos, cobros e inventario usan Supabase. El procesamiento bancario real para QR o tarjeta aún no está integrado:
 
 | Método | Endpoint | Propósito |
 | --- | --- | --- |
@@ -175,8 +191,9 @@ El esquema también contiene `registrar_pago` y `cambiar_estado_pedido` como fun
 ## Estado del proyecto
 
 - **Listo:** servidor Express, interfaz de caja de demostración, búsqueda y filtros de menú, carrito, flujo de cobro simulado, esquema SQL Supabase, login real con Supabase Auth, cookies de sesión HttpOnly, renovación/cierre de sesión y autorización HTTP por rol.
-- **Pendiente:** persistencia real del catálogo, pedidos, pagos e inventario con Supabase, CI/CD y despliegue en la nube.
-- **Docker local:** imagen del backend con su interfaz estática, endpoint de salud y ejecución endurecida mediante Docker Compose; no incluye PostgreSQL porque todavía no existe una conexión activa desde la aplicación.
+- **Listo:** servidor Express, interfaz de caja, catálogo y categorías persistidos en Supabase, pedidos con variantes y precios de base de datos, cobro transaccional, reportes, inventario por sucursal, login real, cookies HttpOnly y autorización por rol.
+- **Pendiente:** pasarela de pago real para QR/tarjeta, consumo de insumos por receta, CI/CD y despliegue en la nube.
+- **Docker local:** imagen del backend con su interfaz estática, endpoint de salud e integración con el proyecto Supabase externo, ejecutada con medidas de endurecimiento mediante Docker Compose.
 - **No incluido aún:** clientes asociados a pedidos y descuento automático de insumos por venta. El SQL entregado contiene insumos y compras, pero no una receta producto-insumo ni una función de consumo.
 
 ## Requerimientos de calidad
@@ -189,7 +206,7 @@ El esquema también contiene `registrar_pago` y `cambiar_estado_pedido` como fun
 
 ## Registro de cambios
 
-- Se incorporó `backend/database/moka_supabase.sql` con el esquema compartido para Supabase; se verificó que la copia coincide con el archivo original.
+- Se incorporó `backend/database/moka_supabase.sql` con el esquema compartido para Supabase y las funciones de pedidos/cobros; se verificó que la copia coincide con el archivo original.
 - Se amplió este README con el alcance de la solución, actores, arquitectura, instrucciones SQL, rutas disponibles y pendientes reales.
 - Se alineó el puerto documentado con el servidor (`3001`) y se contextualizó el catálogo de demostración a Moka.
 - Se agregó una interfaz de punto de venta servida desde `/`, con estilos adaptables a móvil y tablet, búsqueda, filtros, cantidades y confirmación de cobro local.
