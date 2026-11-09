@@ -102,8 +102,11 @@ create table if not exists public.detalle_pedido (
   variante_id     uuid not null references public.variantes_producto(id) on delete restrict,
   cantidad        integer not null check (cantidad > 0),
   precio_unitario numeric(10,2) not null default 0 check (precio_unitario >= 0),
+  opciones        jsonb not null default '{}'::jsonb,
   subtotal        numeric(10,2) generated always as (cantidad * precio_unitario) stored
 );
+
+alter table public.detalle_pedido add column if not exists opciones jsonb not null default '{}'::jsonb;
 
 create table if not exists public.pagos (
   id        uuid primary key default gen_random_uuid(),
@@ -113,6 +116,48 @@ create table if not exists public.pagos (
   estado    public.estado_pago not null default 'PENDIENTE',
   fecha     timestamptz not null default now()
 );
+
+create table if not exists public.recetas (
+  variante_id  uuid not null references public.variantes_producto(id) on delete cascade,
+  insumo_id    uuid not null references public.insumos(id) on delete restrict,
+  cantidad     numeric(12,3) not null check (cantidad > 0),
+  opcion_leche text not null default 'TODAS',
+  opcion_agregado text not null default 'NINGUNO',
+  primary key (variante_id, insumo_id, opcion_leche, opcion_agregado),
+  constraint ck_receta_opcion_leche check (opcion_leche in ('TODAS','ENTERA','ALMENDRA','DESLACTOSADA')),
+  constraint ck_receta_opcion_agregado check (opcion_agregado in ('NINGUNO','VAINILLA','CARAMELO','CHOCOLATE'))
+);
+
+alter table public.recetas add column if not exists opcion_leche text not null default 'TODAS';
+alter table public.recetas add column if not exists opcion_agregado text not null default 'NINGUNO';
+alter table public.recetas drop constraint if exists recetas_pkey;
+alter table public.recetas add constraint recetas_pkey primary key (variante_id, insumo_id, opcion_leche, opcion_agregado);
+alter table public.recetas drop constraint if exists ck_receta_opcion_leche;
+alter table public.recetas add constraint ck_receta_opcion_leche
+  check (opcion_leche in ('TODAS','ENTERA','ALMENDRA','DESLACTOSADA'));
+alter table public.recetas drop constraint if exists ck_receta_opcion_agregado;
+alter table public.recetas add constraint ck_receta_opcion_agregado
+  check (opcion_agregado in ('NINGUNO','VAINILLA','CARAMELO','CHOCOLATE'));
+
+create table if not exists public.caja_turnos (
+  id              uuid primary key default gen_random_uuid(),
+  usuario_id      uuid not null references public.usuarios(id) on delete restrict,
+  sucursal_id     uuid not null references public.sucursales(id) on delete restrict,
+  apertura        timestamptz not null default now(),
+  monto_inicial   numeric(12,2) not null check (monto_inicial >= 0),
+  cierre          timestamptz,
+  total_vendido   numeric(12,2) not null default 0,
+  monto_esperado  numeric(12,2),
+  monto_cierre    numeric(12,2),
+  diferencia      numeric(12,2),
+  estado          text not null default 'ABIERTO' check (estado in ('ABIERTO','CERRADO')),
+  constraint ck_caja_turno_cerrado check (
+    (estado = 'ABIERTO' and cierre is null and monto_cierre is null)
+    or (estado = 'CERRADO' and cierre is not null and monto_cierre is not null)
+  )
+);
+
+alter table public.pagos add column if not exists caja_turno_id uuid references public.caja_turnos(id) on delete set null;
 
 -- ---------------------------------------------------------------------
 -- 3. ÍNDICES
@@ -125,6 +170,10 @@ create index if not exists idx_pedidos_sucursal    on public.pedidos(sucursal_id
 create index if not exists idx_pedidos_usuario     on public.pedidos(usuario_id);
 create index if not exists idx_detalle_pedido      on public.detalle_pedido(pedido_id);
 create index if not exists idx_pagos_pedido        on public.pagos(pedido_id);
+create index if not exists idx_pagos_turno         on public.pagos(caja_turno_id);
+create index if not exists idx_recetas_insumo      on public.recetas(insumo_id);
+create unique index if not exists idx_caja_turno_abierto_usuario
+  on public.caja_turnos(usuario_id) where estado = 'ABIERTO';
 
 -- ---------------------------------------------------------------------
 -- 4. FUNCIONES AUXILIARES DE SEGURIDAD
@@ -242,7 +291,38 @@ create trigger trg_touch_insumo
 before update on public.insumos
 for each row execute function public.fn_touch_insumo();
 
--- 5.6 Registrar pago + pasar el pedido a PAGADO (una sola transacción)
+-- Consume los ingredientes de las variantes del pedido, bloqueando stock por fila.
+create or replace function public.consumir_insumos_pedido(p_pedido uuid)
+returns void
+language plpgsql security definer set search_path = public as $$
+declare v_receta record; v_sucursal uuid;
+begin
+  select sucursal_id into v_sucursal from public.pedidos where id = p_pedido;
+  if v_sucursal is null then raise exception 'Pedido no encontrado'; end if;
+
+  for v_receta in
+    select r.insumo_id, sum(r.cantidad * d.cantidad)::numeric(12,3) as consumo
+      from public.detalle_pedido d
+      join public.recetas r on r.variante_id = d.variante_id
+     where d.pedido_id = p_pedido
+       and (r.opcion_leche = 'TODAS'
+         or r.opcion_leche = coalesce(d.opciones ->> 'leche', 'ENTERA'))
+       and (r.opcion_agregado = 'NINGUNO'
+         or coalesce(d.opciones -> 'agregados', '[]'::jsonb) ? r.opcion_agregado)
+     group by r.insumo_id
+  loop
+    update public.insumos
+       set stock = stock - v_receta.consumo
+     where id = v_receta.insumo_id
+       and sucursal_id = v_sucursal
+       and stock >= v_receta.consumo;
+    if not found then
+      raise exception 'Stock insuficiente para el insumo %', v_receta.insumo_id;
+    end if;
+  end loop;
+end $$;
+
+-- 5.6 Registrar pago + enviar el pedido a preparación (una sola transacción)
 --     Solo caja/administración o el backend (service_role, por ejemplo
 --     al recibir el webhook de la pasarela de pagos QR).
 create or replace function public.registrar_pago(p_pedido uuid, p_metodo public.metodo_pago)
@@ -251,6 +331,7 @@ language plpgsql security definer set search_path = public as $$
 declare
   v_total numeric(10,2);
   v_pago  uuid;
+  v_turno uuid;
 begin
   if not (public.es_staff(array['ADMIN','CASHIER']::public.rol_usuario[])
           or coalesce(auth.role(), '') = 'service_role') then
@@ -264,11 +345,21 @@ begin
   if v_total is null then raise exception 'El pedido no existe o ya no está pendiente de pago'; end if;
   if v_total <= 0   then raise exception 'El pedido no tiene productos'; end if;
 
-  insert into public.pagos (pedido_id, metodo, monto, estado)
-  values (p_pedido, p_metodo, v_total, 'CONFIRMADO')
+  if coalesce(auth.role(), '') <> 'service_role' then
+    select id into v_turno from public.caja_turnos
+     where usuario_id = auth.uid() and estado = 'ABIERTO'
+       and sucursal_id = (select sucursal_id from public.pedidos where id = p_pedido)
+     for update;
+    if v_turno is null then raise exception 'Debes abrir un turno de caja antes de cobrar'; end if;
+  end if;
+
+  perform public.consumir_insumos_pedido(p_pedido);
+
+  insert into public.pagos (pedido_id, metodo, monto, estado, caja_turno_id)
+  values (p_pedido, p_metodo, v_total, 'CONFIRMADO', v_turno)
   returning id into v_pago;
 
-  update public.pedidos set estado = 'PAGADO' where id = p_pedido;
+  update public.pedidos set estado = 'EN_PREPARACION' where id = p_pedido;
   return v_pago;
 end $$;
 
@@ -310,6 +401,9 @@ begin
   loop
     v_variante := (v_item ->> 'varianteId')::uuid;
     v_cantidad := (v_item ->> 'cantidad')::integer;
+    if v_item ? 'opciones' and jsonb_typeof(v_item -> 'opciones') <> 'object' then
+      raise exception 'Las opciones del producto deben ser un objeto';
+    end if;
     if v_cantidad is null or v_cantidad < 1 or v_cantidad > 99 then
       raise exception 'La cantidad de cada producto debe estar entre 1 y 99';
     end if;
@@ -321,11 +415,75 @@ begin
       raise exception 'Una variante no existe o no está activa';
     end if;
 
-    insert into public.detalle_pedido (pedido_id, variante_id, cantidad)
-    values (v_pedido, v_variante, v_cantidad);
+    insert into public.detalle_pedido (pedido_id, variante_id, cantidad, opciones)
+    values (v_pedido, v_variante, v_cantidad, coalesce(v_item -> 'opciones', '{}'::jsonb));
   end loop;
 
   return v_pedido;
+end $$;
+
+create or replace function public.abrir_turno_caja(p_monto_inicial numeric)
+returns uuid
+language plpgsql security definer set search_path = public as $$
+declare v_sucursal uuid; v_turno uuid;
+begin
+  if not coalesce(public.app_rol() in ('ADMIN','CASHIER'), false) then
+    raise exception 'No autorizado para abrir caja';
+  end if;
+  if p_monto_inicial is null or p_monto_inicial < 0 then
+    raise exception 'El monto inicial debe ser mayor o igual a cero';
+  end if;
+
+  v_sucursal := public.app_sucursal();
+  if v_sucursal is null and public.app_rol() = 'ADMIN' then
+    select id into v_sucursal from public.sucursales where activa order by nombre limit 1;
+  end if;
+  if v_sucursal is null then raise exception 'El perfil no tiene sucursal asignada'; end if;
+
+  insert into public.caja_turnos (usuario_id, sucursal_id, monto_inicial)
+  values (auth.uid(), v_sucursal, p_monto_inicial)
+  returning id into v_turno;
+  return v_turno;
+end $$;
+
+create or replace function public.cerrar_turno_caja(p_turno uuid, p_monto_cierre numeric)
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_turno public.caja_turnos%rowtype; v_vendido numeric(12,2); v_efectivo numeric(12,2); v_esperado numeric(12,2);
+begin
+  if not coalesce(public.app_rol() in ('ADMIN','CASHIER'), false) then
+    raise exception 'No autorizado para cerrar caja';
+  end if;
+  if p_monto_cierre is null or p_monto_cierre < 0 then
+    raise exception 'El monto de cierre debe ser mayor o igual a cero';
+  end if;
+
+  select * into v_turno from public.caja_turnos
+   where id = p_turno and estado = 'ABIERTO' for update;
+  if not found then raise exception 'El turno no existe o ya fue cerrado'; end if;
+  if v_turno.usuario_id <> auth.uid() and public.app_rol() <> 'ADMIN' then
+    raise exception 'No autorizado para cerrar este turno';
+  end if;
+
+  select coalesce(sum(pg.monto), 0) into v_vendido
+    from public.pagos pg
+   where pg.caja_turno_id = v_turno.id and pg.estado = 'CONFIRMADO';
+  select coalesce(sum(pg.monto), 0) into v_efectivo
+    from public.pagos pg
+   where pg.caja_turno_id = v_turno.id and pg.estado = 'CONFIRMADO' and pg.metodo = 'EFECTIVO';
+  v_esperado := v_turno.monto_inicial + v_efectivo;
+
+  update public.caja_turnos set
+    cierre = now(), total_vendido = v_vendido, monto_esperado = v_esperado,
+    monto_cierre = p_monto_cierre, diferencia = p_monto_cierre - v_esperado,
+    estado = 'CERRADO'
+  where id = p_turno;
+
+  return jsonb_build_object(
+    'id', p_turno, 'totalVendido', v_vendido, 'montoEsperado', v_esperado,
+    'montoCierre', p_monto_cierre, 'diferencia', p_monto_cierre - v_esperado,
+    'estado', 'CERRADO'
+  );
 end $$;
 
 -- Una sola operación para que el pedido y el pago se confirmen juntos.
@@ -411,18 +569,25 @@ grant select on public.sucursales to authenticated;
 grant select on public.usuarios to authenticated;
 grant select on public.categorias, public.productos, public.variantes_producto to anon, authenticated;
 grant select, insert, update, delete on public.categorias, public.productos, public.variantes_producto, public.insumos to authenticated;
+grant select, insert, update, delete on public.recetas to authenticated;
 grant select on public.pedidos, public.detalle_pedido, public.pagos to authenticated;
+grant select on public.caja_turnos to authenticated;
 grant insert on public.pedidos, public.detalle_pedido to authenticated;
 revoke all on function public.crear_pedido(jsonb, public.tipo_pedido) from public, anon;
 revoke all on function public.crear_pedido_y_cobrar(jsonb, public.metodo_pago, public.tipo_pedido) from public, anon;
 revoke all on function public.registrar_pago(uuid, public.metodo_pago) from public, anon;
 revoke all on function public.cambiar_estado_pedido(uuid, public.estado_pedido) from public, anon;
 revoke all on function public.registrar_compra_insumo(uuid, numeric) from public, anon;
+revoke all on function public.consumir_insumos_pedido(uuid) from public, anon, authenticated;
+revoke all on function public.abrir_turno_caja(numeric) from public, anon;
+revoke all on function public.cerrar_turno_caja(uuid, numeric) from public, anon;
 grant execute on function public.crear_pedido(jsonb, public.tipo_pedido) to authenticated;
 grant execute on function public.crear_pedido_y_cobrar(jsonb, public.metodo_pago, public.tipo_pedido) to authenticated;
 grant execute on function public.registrar_pago(uuid, public.metodo_pago) to authenticated;
 grant execute on function public.cambiar_estado_pedido(uuid, public.estado_pedido) to authenticated;
 grant execute on function public.registrar_compra_insumo(uuid, numeric) to authenticated;
+grant execute on function public.abrir_turno_caja(numeric) to authenticated;
+grant execute on function public.cerrar_turno_caja(uuid, numeric) to authenticated;
 
 -- ---------------------------------------------------------------------
 -- 6. VISTAS (security_invoker: respetan RLS del usuario que consulta)
@@ -432,11 +597,11 @@ select i.id, i.sucursal_id, i.nombre, i.unidad, i.stock, i.stock_minimo
   from public.insumos i where i.stock <= i.stock_minimo;
 
 create or replace view public.vw_ventas_diarias with (security_invoker = true) as
-select p.sucursal_id, date_trunc('day', p.fecha)::date as dia,
+select p.sucursal_id, (p.fecha at time zone 'America/La_Paz')::date as dia,
        count(*) as pedidos, sum(p.total) as total_vendido
   from public.pedidos p
  where p.estado in ('PAGADO','EN_PREPARACION','LISTO','ENTREGADO')
- group by p.sucursal_id, date_trunc('day', p.fecha);
+ group by p.sucursal_id, (p.fecha at time zone 'America/La_Paz')::date;
 
 create or replace view public.vw_productos_mas_vendidos with (security_invoker = true) as
 select p.sucursal_id, pr.id as producto_id, pr.nombre as producto,
@@ -462,6 +627,8 @@ alter table public.insumos            enable row level security;
 alter table public.pedidos            enable row level security;
 alter table public.detalle_pedido     enable row level security;
 alter table public.pagos              enable row level security;
+alter table public.recetas            enable row level security;
+alter table public.caja_turnos        enable row level security;
 
 -- Sucursales: públicas si están activas; ADMIN gestiona
 drop policy if exists p_suc_select on public.sucursales;
@@ -510,6 +677,25 @@ drop policy if exists p_ins_all on public.insumos;
 create policy p_ins_all on public.insumos for all to authenticated
   using (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and sucursal_id = public.app_sucursal()))
   with check (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and sucursal_id = public.app_sucursal()));
+
+drop policy if exists p_recetas_read on public.recetas;
+create policy p_recetas_read on public.recetas for select to authenticated
+  using (public.app_rol() = 'ADMIN' or exists (
+    select 1 from public.insumos i
+     where i.id = insumo_id and i.sucursal_id = public.app_sucursal()
+  ));
+drop policy if exists p_recetas_write on public.recetas;
+create policy p_recetas_write on public.recetas for all to authenticated
+  using (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and exists (
+    select 1 from public.insumos i where i.id = insumo_id and i.sucursal_id = public.app_sucursal()
+  )))
+  with check (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and exists (
+    select 1 from public.insumos i where i.id = insumo_id and i.sucursal_id = public.app_sucursal()
+  )));
+
+drop policy if exists p_caja_turnos_select on public.caja_turnos;
+create policy p_caja_turnos_select on public.caja_turnos for select to authenticated
+  using (public.app_rol() = 'ADMIN' or usuario_id = auth.uid());
 
 -- Pedidos
 drop policy if exists p_ped_select on public.pedidos;
@@ -624,9 +810,64 @@ on conflict (producto_id, tamano) do nothing;
 insert into public.insumos (sucursal_id, nombre, unidad, stock, stock_minimo) values
   ('00000000-0000-0000-0000-000000000001', 'Café en grano', 'kg',    20, 5),
   ('00000000-0000-0000-0000-000000000001', 'Leche',         'litro', 40, 10),
+  ('00000000-0000-0000-0000-000000000001', 'Leche de almendra', 'litro', 10, 2),
+  ('00000000-0000-0000-0000-000000000001', 'Leche deslactosada', 'litro', 10, 2),
+  ('00000000-0000-0000-0000-000000000001', 'Jarabe de vainilla', 'litro', 5, 1),
+  ('00000000-0000-0000-0000-000000000001', 'Jarabe de caramelo', 'litro', 5, 1),
+  ('00000000-0000-0000-0000-000000000001', 'Salsa de chocolate', 'kg', 5, 1),
   ('00000000-0000-0000-0000-000000000001', 'Azúcar',        'kg',    15, 3),
   ('00000000-0000-0000-0000-000000000001', 'Chocolate',     'kg',     8, 2)
 on conflict (sucursal_id, nombre) do nothing;
+
+insert into public.recetas (variante_id, insumo_id, cantidad, opcion_leche)
+select v.id, i.id, x.cantidad, x.opcion_leche
+  from (values
+    ('Espresso', 'P', 'Café en grano', 0.018::numeric, 'TODAS'),
+    ('Espresso', 'M', 'Café en grano', 0.020::numeric, 'TODAS'),
+    ('Espresso', 'G', 'Café en grano', 0.022::numeric, 'TODAS'),
+    ('Capuchino', 'P', 'Café en grano', 0.018::numeric, 'TODAS'),
+    ('Capuchino', 'P', 'Leche', 0.100::numeric, 'ENTERA'),
+    ('Capuchino', 'P', 'Leche de almendra', 0.100::numeric, 'ALMENDRA'),
+    ('Capuchino', 'P', 'Leche deslactosada', 0.100::numeric, 'DESLACTOSADA'),
+    ('Capuchino', 'M', 'Café en grano', 0.020::numeric, 'TODAS'),
+    ('Capuchino', 'M', 'Leche', 0.140::numeric, 'ENTERA'),
+    ('Capuchino', 'M', 'Leche de almendra', 0.140::numeric, 'ALMENDRA'),
+    ('Capuchino', 'M', 'Leche deslactosada', 0.140::numeric, 'DESLACTOSADA'),
+    ('Capuchino', 'G', 'Café en grano', 0.022::numeric, 'TODAS'),
+    ('Capuchino', 'G', 'Leche', 0.180::numeric, 'ENTERA'),
+    ('Capuchino', 'G', 'Leche de almendra', 0.180::numeric, 'ALMENDRA'),
+    ('Capuchino', 'G', 'Leche deslactosada', 0.180::numeric, 'DESLACTOSADA'),
+    ('Latte', 'P', 'Café en grano', 0.018::numeric, 'TODAS'),
+    ('Latte', 'P', 'Leche', 0.140::numeric, 'ENTERA'),
+    ('Latte', 'P', 'Leche de almendra', 0.140::numeric, 'ALMENDRA'),
+    ('Latte', 'P', 'Leche deslactosada', 0.140::numeric, 'DESLACTOSADA'),
+    ('Latte', 'M', 'Café en grano', 0.020::numeric, 'TODAS'),
+    ('Latte', 'M', 'Leche', 0.180::numeric, 'ENTERA'),
+    ('Latte', 'M', 'Leche de almendra', 0.180::numeric, 'ALMENDRA'),
+    ('Latte', 'M', 'Leche deslactosada', 0.180::numeric, 'DESLACTOSADA'),
+    ('Latte', 'G', 'Café en grano', 0.022::numeric, 'TODAS'),
+    ('Latte', 'G', 'Leche', 0.220::numeric, 'ENTERA'),
+    ('Latte', 'G', 'Leche de almendra', 0.220::numeric, 'ALMENDRA'),
+    ('Latte', 'G', 'Leche deslactosada', 0.220::numeric, 'DESLACTOSADA'),
+    ('Brownie', 'UNICO', 'Chocolate', 0.100::numeric, 'TODAS')
+  ) as x(producto, tamano, insumo, cantidad, opcion_leche)
+  join public.productos p on p.nombre = x.producto
+  join public.variantes_producto v on v.producto_id = p.id and v.tamano = x.tamano::public.tamano_producto
+  join public.insumos i on i.nombre = x.insumo and i.sucursal_id = '00000000-0000-0000-0000-000000000001'
+on conflict (variante_id, insumo_id, opcion_leche, opcion_agregado) do nothing;
+
+insert into public.recetas (variante_id, insumo_id, cantidad, opcion_leche, opcion_agregado)
+select v.id, i.id, x.cantidad, 'TODAS', x.opcion_agregado
+  from public.productos p
+  join public.categorias c on c.id = p.categoria_id and c.nombre = 'Cafés'
+  join public.variantes_producto v on v.producto_id = p.id
+  cross join (values
+    ('VAINILLA', 'Jarabe de vainilla', 0.010::numeric),
+    ('CARAMELO', 'Jarabe de caramelo', 0.010::numeric),
+    ('CHOCOLATE', 'Salsa de chocolate', 0.010::numeric)
+  ) as x(opcion_agregado, insumo, cantidad)
+  join public.insumos i on i.nombre = x.insumo and i.sucursal_id = '00000000-0000-0000-0000-000000000001'
+on conflict (variante_id, insumo_id, opcion_leche, opcion_agregado) do nothing;
 
 -- ---------------------------------------------------------------------
 -- 10. ASIGNAR ROLES (ejecutar DESPUÉS de crear los usuarios en

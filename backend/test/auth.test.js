@@ -71,8 +71,8 @@ test("serves the login screen with security headers and a public health check", 
 
 test("does not fall back to demo data when Supabase is missing and blocks protected operations", async () => {
     const catalog = await fetch(`${baseUrl}/api/productos`);
-    assert.equal(catalog.status, 502);
-    assert.match((await catalog.json()).mensaje, /base de datos/i);
+    assert.equal(catalog.status, 500);
+    assert.match((await catalog.json()).mensaje, /error interno/i);
 
     const login = await fetch(`${baseUrl}/api/auth/login`, {
         method: "POST",
@@ -84,6 +84,16 @@ test("does not fall back to demo data when Supabase is missing and blocks protec
 
     const protectedRoute = await fetch(`${baseUrl}/api/pedidos`, { method: "POST" });
     assert.equal(protectedRoute.status, 503);
+
+    const shiftRoute = await fetch(`${baseUrl}/api/caja/turno`);
+    assert.equal(shiftRoute.status, 503);
+
+    const openShiftRoute = await fetch(`${baseUrl}/api/caja/turno/abrir`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ montoInicial: 100 })
+    });
+    assert.equal(openShiftRoute.status, 503);
 });
 
 test("rejects cross-origin login and logout attempts", async () => {

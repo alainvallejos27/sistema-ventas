@@ -45,9 +45,10 @@
       <nav class="main-nav">
         <a class="nav-link active" href="#/" data-route="/"><span class="nav-icon">01</span><span>Caja</span></a>
         <a class="nav-link" href="#/pedidos" data-route="/pedidos"><span class="nav-icon">02</span><span>Pedidos</span></a>
-        <a class="nav-link" href="#/productos" data-route="/productos"><span class="nav-icon">03</span><span>Productos</span></a>
-        <a class="nav-link" href="#/categorias" data-route="/categorias"><span class="nav-icon">04</span><span>Categorías</span></a>
-        <a class="nav-link" href="#/inventario" data-route="/inventario"><span class="nav-icon">05</span><span>Inventario</span></a>
+        <a class="nav-link" href="#/turno" data-route="/turno"><span class="nav-icon">03</span><span>Turno de caja</span></a>
+        <a class="nav-link" href="#/productos" data-route="/productos"><span class="nav-icon">04</span><span>Productos</span></a>
+        <a class="nav-link" href="#/categorias" data-route="/categorias"><span class="nav-icon">05</span><span>Categorías</span></a>
+        <a class="nav-link" href="#/inventario" data-route="/inventario"><span class="nav-icon">06</span><span>Inventario <span class="nav-badge" id="inventory-badge" hidden></span></span></a>
       </nav>
       <div class="sidebar-bottom">
         <div class="user-avatar" id="user-avatar">M</div>
@@ -78,6 +79,11 @@
           <div class="stat stat-note"><span class="stat-label">EN PREPARACION</span><strong id="preparing-count">0 <small>pedidos</small></strong><span class="stat-foot">Se actualiza al cobrar</span></div>
         </section>
 
+        <section class="analytics-panel" id="analytics-panel" aria-label="Analítica de ventas" hidden>
+          <div class="analytics-block"><div class="module-heading"><div><p class="eyebrow">ÚLTIMOS SIETE DÍAS</p><h2>Ventas diarias</h2></div></div><div class="sales-chart" id="sales-chart" role="img" aria-label="Gráfico de ventas diarias"></div></div>
+          <div class="analytics-block"><div class="module-heading"><div><p class="eyebrow">CATÁLOGO</p><h2>Más vendidos</h2></div></div><ol class="best-sellers" id="best-sellers"></ol></div>
+        </section>
+
         <div class="pos-layout">
           <section class="menu-section" aria-labelledby="menu-title">
             <div class="section-heading">
@@ -102,9 +108,21 @@
           </aside>
         </div>
         <section class="module-page" data-module="pedidos" aria-labelledby="pedidos-title">
-          <div class="module-heading"><div><p class="eyebrow">OPERACIONES <span>·</span> SEGUIMIENTO</p><h2 id="pedidos-title">Pedidos</h2><p class="module-copy">Controla el flujo de cada pedido hasta la entrega.</p></div><button class="filter-button selected" type="button" id="refresh-orders">Actualizar lista</button></div>
+          <div class="module-heading"><div><p class="eyebrow">OPERACIONES <span>·</span> SEGUIMIENTO</p><h2 id="pedidos-title">Pedidos</h2><p class="module-copy" id="orders-description">Controla el flujo de cada pedido hasta la entrega.</p></div><button class="filter-button selected" type="button" id="refresh-orders">Actualizar lista</button></div>
           <div class="filter-row" id="order-filters"><button class="filter-button selected" data-order-status="TODOS">Todos</button><button class="filter-button" data-order-status="PENDIENTE">Pendientes</button><button class="filter-button" data-order-status="PAGADO">Pagados</button><button class="filter-button" data-order-status="EN_PREPARACION">En preparación</button><button class="filter-button" data-order-status="ENTREGADO">Entregados</button></div>
           <div class="table-shell"><table class="data-table"><thead><tr><th>Pedido</th><th>Fecha</th><th>Total</th><th>Estado</th><th>Acción</th></tr></thead><tbody id="orders-table"></tbody></table></div>
+        </section>
+        <section class="module-page" data-module="turno" aria-labelledby="turno-title">
+          <div class="module-heading"><div><p class="eyebrow">OPERACIONES <span>·</span> CAJA</p><h2 id="turno-title">Turno de caja</h2><p class="module-copy">Registra la apertura, ventas y diferencia al cierre.</p></div></div>
+          <div class="shift-layout">
+            <section class="shift-summary"><p class="eyebrow">ESTADO DEL TURNO</p><h3 id="shift-state">Consultando caja…</h3><p class="module-copy" id="shift-time"></p>
+              <dl class="shift-totals"><div><dt>Monto inicial</dt><dd id="shift-opening-total">Bs 0,00</dd></div><div><dt>Total vendido</dt><dd id="shift-sales-total">Bs 0,00</dd></div><div><dt>Esperado en caja</dt><dd id="shift-expected-total">Bs 0,00</dd></div></dl>
+            </section>
+            <section class="shift-actions"><form id="shift-open-form"><label class="form-field" for="shift-opening-amount">Monto inicial en Bs<input id="shift-opening-amount" type="number" min="0" step="0.01" value="0" required></label><button class="checkout-button" type="submit" id="shift-open-button">Abrir turno</button></form>
+              <form id="shift-close-form" hidden><label class="form-field" for="shift-closing-amount">Efectivo contado al cierre (Bs)<input id="shift-closing-amount" type="number" min="0" step="0.01" required></label><button class="checkout-button" type="submit" id="shift-close-button">Cerrar turno</button></form>
+              <p class="form-error" id="shift-error" role="alert"></p><p class="module-copy" id="shift-result"></p>
+            </section>
+          </div>
         </section>
         <section class="module-page" data-module="productos" aria-labelledby="productos-title">
           <div class="module-heading"><div><p class="eyebrow">CATÁLOGO <span>·</span> ADMINISTRACIÓN</p><h2 id="productos-title">Productos</h2><p class="module-copy">Gestiona el menú que aparece en Caja.</p></div><button class="checkout-button module-action" type="button" id="new-product">+ Nuevo producto</button></div>
@@ -133,9 +151,27 @@
         <label><input type="radio" name="payment" value="QR"><span><b>QR</b><small>Transferencia</small></span></label>
         <label><input type="radio" name="payment" value="TARJETA"><span><b>Tarjeta</b><small>Débito o crédito</small></span></label>
       </div>
+      <label class="form-field cash-received" id="cash-received-field" for="cash-received">Dinero recibido (Bs)<input id="cash-received" name="recibido" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0,00"></label>
+      <div class="change-line" id="change-line" aria-live="polite"><span>Cambio</span><strong id="cash-change">Bs 0,00</strong></div>
       <div class="dialog-total"><span>Total a cobrar</span><strong id="dialog-total">Bs 0,00</strong></div>
       <button class="checkout-button confirm-button" id="confirm-payment" value="confirm"><span>Confirmar cobro</span><span aria-hidden="true">↗</span></button>
     </form>
+  </dialog>
+  <dialog class="payment-dialog entity-dialog" id="customize-dialog" aria-labelledby="customize-title">
+    <form method="dialog" id="customize-form">
+      <div class="dialog-top"><span class="dialog-kicker">PERSONALIZA TU PEDIDO</span><button class="close-button" value="cancel" aria-label="Cerrar">×</button></div>
+      <h2 id="customize-title">Producto</h2><p class="dialog-copy" id="customize-description"></p>
+      <label class="form-field" id="customize-size-field" for="customize-size">Tamaño<select id="customize-size" name="tamano"></select></label>
+      <div id="coffee-options"><label class="form-field" for="customize-milk">Tipo de leche<select id="customize-milk" name="leche"><option value="">Sin cambio</option><option value="ENTERA">Entera</option><option value="ALMENDRA">Almendra</option><option value="DESLACTOSADA">Deslactosada</option></select></label>
+        <fieldset class="add-on-options"><legend>Agregados</legend><label><input type="checkbox" name="agregado" value="VAINILLA"> Vainilla</label><label><input type="checkbox" name="agregado" value="CARAMELO"> Caramelo</label><label><input type="checkbox" name="agregado" value="CHOCOLATE"> Chocolate</label></fieldset></div>
+      <p class="form-error" id="customize-error" role="alert"></p>
+      <div class="dialog-actions"><button class="filter-button" value="cancel">Cancelar</button><button class="checkout-button" id="customize-add" value="confirm">Agregar al pedido</button></div>
+    </form>
+  </dialog>
+  <dialog class="payment-dialog ticket-dialog" id="ticket-dialog" aria-labelledby="ticket-title">
+    <div class="dialog-top"><span class="dialog-kicker">COMPROBANTE DE VENTA</span><button class="close-button" id="close-ticket" type="button" aria-label="Cerrar">×</button></div>
+    <h2 id="ticket-title">Ticket Moka</h2><div class="receipt" id="receipt-content"></div>
+    <div class="dialog-actions"><button class="filter-button" id="ticket-done" type="button">Listo</button><button class="checkout-button" id="print-ticket" type="button">Imprimir ticket</button></div>
   </dialog>
   <dialog class="payment-dialog entity-dialog" id="category-dialog" aria-labelledby="category-dialog-title">
     <form method="dialog" id="category-form">

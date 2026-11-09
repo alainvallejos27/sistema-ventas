@@ -20,6 +20,8 @@ router.use((req, res, next) => {
         roles = ["ADMIN", "CASHIER", "BARISTA"];
     } else if (req.path.startsWith("/ventas") || req.path.startsWith("/reportes")) {
         roles = ["ADMIN", "CASHIER"];
+    } else if (req.path.startsWith("/caja")) {
+        roles = ["ADMIN", "CASHIER"];
     }
 
     return checkSameOrigin(req, res, () => authenticate(req, res, () => requireRoles(roles)(req, res, next)));

@@ -9,11 +9,13 @@ const ORDER_WITH_ITEMS = [
     "total",
     "fecha",
     "sucursal_id",
-    "detalle_pedido(id,variante_id,cantidad,precio_unitario,subtotal,variantes_producto(tamano,productos(nombre)))"
+    "detalle_pedido(id,variante_id,cantidad,precio_unitario,subtotal,opciones,variantes_producto(tamano,productos(nombre)))"
 ].join(",");
 const METHODS = ["EFECTIVO", "QR", "TARJETA"];
 const ORDER_TYPES = ["PARA_LLEVAR", "EN_MESA"];
 const ORDER_STATES = ["PENDIENTE", "PAGADO", "EN_PREPARACION", "LISTO", "ENTREGADO", "CANCELADO"];
+const MILK_OPTIONS = ["ENTERA", "ALMENDRA", "DESLACTOSADA"];
+const ADD_ON_OPTIONS = ["VAINILLA", "CARAMELO", "CHOCOLATE"];
 const VARIANT_ORDER = { P: 0, M: 1, G: 2, UNICO: 3 };
 
 class ApiError extends Error {
@@ -31,6 +33,9 @@ function failDatabase(error) {
     console.error("Error en operación Supabase:", error);
     if (error.status === 401) throw new ApiError(401, "La sesión de Supabase expiró. Inicia sesión nuevamente.");
     if (error.status === 403 || error.code === "42501") throw new ApiError(403, "Supabase denegó esta operación por sus permisos o políticas RLS.");
+    if (["PGRST202", "PGRST204", "42P01", "42703"].includes(error.code)) {
+        throw new ApiError(503, "Falta actualizar el esquema de Supabase. Ejecuta backend/database/moka_supabase.sql y vuelve a intentar.");
+    }
     if (error.code === "23505") throw new ApiError(409, "Ya existe un registro con esos datos.");
     if (error.code === "23503") throw new ApiError(409, "No se puede completar la operación porque el registro tiene datos asociados.");
     if (error.code === "P0001" && /no autorizado/i.test(error.message || "")) {
@@ -51,7 +56,7 @@ function dataOrThrow(result) {
 function handleError(res, error) {
     if (error instanceof ApiError) return res.status(error.status).json({ mensaje: error.message });
     console.error("Error inesperado en una ruta de Supabase:", error);
-    return res.status(502).json({ mensaje: "No se pudo completar la operación con la base de datos." });
+    return res.status(500).json({ mensaje: "Ocurrió un error interno al procesar la solicitud." });
 }
 
 function validarTexto(value, label, maxLength) {
@@ -146,9 +151,39 @@ async function cargarPedido(client, pedidoId) {
             precioUnitario: Number(item.precio_unitario),
             subtotal: Number(item.subtotal),
             tamano: item.variantes_producto?.tamano,
-            nombre: item.variantes_producto?.productos?.nombre
+            nombre: item.variantes_producto?.productos?.nombre,
+            opciones: item.opciones || {}
         }))
     };
+}
+
+function normalizarOpciones(value) {
+    if (value === undefined) return {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new ApiError(400, "Las opciones del producto no son válidas.");
+    }
+    const leche = value.leche ?? null;
+    const agregados = value.agregados ?? [];
+    if (leche !== null && !MILK_OPTIONS.includes(leche)) throw new ApiError(400, "El tipo de leche no es válido.");
+    if (!Array.isArray(agregados) || agregados.length > ADD_ON_OPTIONS.length
+        || agregados.some((item) => !ADD_ON_OPTIONS.includes(item))) {
+        throw new ApiError(400, "Los agregados seleccionados no son válidos.");
+    }
+    return { ...(leche ? { leche } : {}), agregados: [...new Set(agregados)] };
+}
+
+function normalizarItems(items) {
+    if (!Array.isArray(items) || items.length === 0 || items.length > 50) {
+        throw new ApiError(400, "El pedido debe incluir entre 1 y 50 productos.");
+    }
+    return items.map((item) => {
+        const cantidad = Number(item?.cantidad);
+        if (typeof item?.varianteId !== "string" || !/^[0-9a-f-]{36}$/i.test(item.varianteId)
+            || !Number.isInteger(cantidad) || cantidad < 1 || cantidad > 99) {
+            throw new ApiError(400, "Cada producto debe tener una variante válida y cantidad de 1 a 99.");
+        }
+        return { varianteId: item.varianteId, cantidad, opciones: normalizarOpciones(item.opciones) };
+    });
 }
 
 router.get("/", (req, res) => {
@@ -499,10 +534,14 @@ router.delete("/insumos/:id", async (req, res) => {
 router.get("/pedidos", async (req, res) => {
     try {
         let query = databaseClient(req).from("pedidos").select(ORDER_WITH_ITEMS).order("fecha", { ascending: false });
+        
         if (req.query.estado && req.query.estado !== "TODOS") {
-            if (!ORDER_STATES.includes(req.query.estado)) throw new ApiError(400, "El estado del pedido no es válido.");
-            query = query.eq("estado", req.query.estado);
+            const estadoBruto = decodeURIComponent(req.query.estado).trim();
+            // Normaliza automáticamente cualquier guion bajo a espacio para Supabase
+            const estadoNormalizado = estadoBruto.replace(/_/g, " ");
+            query = query.eq("estado", estadoNormalizado);
         }
+
         const orders = dataOrThrow(await query);
         return res.json(orders.map((order) => ({
             ...order,
@@ -512,33 +551,24 @@ router.get("/pedidos", async (req, res) => {
                 precioUnitario: Number(item.precio_unitario),
                 subtotal: Number(item.subtotal),
                 tamano: item.variantes_producto?.tamano,
-                nombre: item.variantes_producto?.productos?.nombre
+                nombre: item.variantes_producto?.productos?.nombre,
+                opciones: item.opciones || {}
             }))
         })));
     } catch (error) {
+        console.error("Error detallado en GET /pedidos:", error);
         return handleError(res, error);
     }
 });
 
 router.post("/pedidos", async (req, res) => {
     try {
-        const items = req.body?.items;
+        const items = normalizarItems(req.body?.items);
         const tipo = req.body?.tipo || "PARA_LLEVAR";
-        if (!Array.isArray(items) || items.length === 0 || items.length > 50) {
-            throw new ApiError(400, "El pedido debe incluir entre 1 y 50 productos.");
-        }
         if (!ORDER_TYPES.includes(tipo)) throw new ApiError(400, "El tipo de pedido no es válido.");
-        const normalizedItems = items.map((item) => {
-            const cantidad = Number(item?.cantidad);
-            if (typeof item?.varianteId !== "string" || !/^[0-9a-f-]{36}$/i.test(item.varianteId)
-                || !Number.isInteger(cantidad) || cantidad < 1 || cantidad > 99) {
-                throw new ApiError(400, "Cada producto debe tener una variante válida y cantidad de 1 a 99.");
-            }
-            return { varianteId: item.varianteId, cantidad };
-        });
 
         const result = await databaseClient(req).rpc("crear_pedido", {
-            p_items: normalizedItems,
+            p_items: items,
             p_tipo: tipo
         });
         const orderId = dataOrThrow(result);
@@ -551,7 +581,7 @@ router.post("/pedidos", async (req, res) => {
 router.patch("/pedidos/:id/estado", async (req, res) => {
     try {
         const estado = req.body?.estado;
-        if (!ORDER_STATES.includes(estado) || estado === "PENDIENTE" || estado === "PAGADO") {
+        if (!ORDER_STATES.includes(estado)) {
             throw new ApiError(400, "El nuevo estado del pedido no es válido.");
         }
         dataOrThrow(await databaseClient(req).rpc("cambiar_estado_pedido", {
@@ -559,6 +589,67 @@ router.patch("/pedidos/:id/estado", async (req, res) => {
             p_nuevo: estado
         }));
         return res.json(await cargarPedido(databaseClient(req), req.params.id));
+    } catch (error) {
+        return handleError(res, error);
+    }
+});
+router.get("/caja/turno", async (req, res) => {
+    try {
+        const client = databaseClient(req);
+        const result = await client.from("caja_turnos")
+            .select("id,usuario_id,sucursal_id,apertura,monto_inicial,estado")
+            .eq("usuario_id", req.auth.user.id)
+            .eq("estado", "ABIERTO")
+            .maybeSingle();
+        const turno = dataOrThrow(result);
+        if (!turno) return res.json(null);
+        const payments = dataOrThrow(await client.from("pagos")
+            .select("monto,metodo")
+            .eq("caja_turno_id", turno.id)
+            .eq("estado", "CONFIRMADO"));
+        const totalVendido = payments.reduce((total, payment) => total + Number(payment.monto), 0);
+        const efectivo = payments.filter((payment) => payment.metodo === "EFECTIVO")
+            .reduce((total, payment) => total + Number(payment.monto), 0);
+        return res.json({
+            ...turno,
+            total_vendido: totalVendido,
+            monto_esperado: Number(turno.monto_inicial) + efectivo
+        });
+    } catch (error) {
+        return handleError(res, error);
+    }
+});
+
+router.post("/caja/turno/abrir", async (req, res) => {
+    try {
+        const montoInicial = Number(req.body?.montoInicial);
+        if (!Number.isFinite(montoInicial) || montoInicial < 0 || montoInicial > 1000000) {
+            throw new ApiError(400, "El monto inicial debe ser un número entre 0 y 1.000.000.");
+        }
+        const client = databaseClient(req);
+        const turnoId = dataOrThrow(await client.rpc("abrir_turno_caja", { p_monto_inicial: montoInicial }));
+        const turno = dataOrThrow(await client.from("caja_turnos")
+            .select("id,usuario_id,sucursal_id,apertura,monto_inicial,estado")
+            .eq("id", turnoId)
+            .single());
+        return res.status(201).json(turno);
+    } catch (error) {
+        return handleError(res, error);
+    }
+});
+
+router.post("/caja/turno/cerrar", async (req, res) => {
+    try {
+        const montoCierre = Number(req.body?.montoCierre);
+        if (typeof req.body?.turnoId !== "string" || !/^[0-9a-f-]{36}$/i.test(req.body.turnoId)
+            || !Number.isFinite(montoCierre) || montoCierre < 0 || montoCierre > 1000000) {
+            throw new ApiError(400, "Envía un turno válido y un monto de cierre entre 0 y 1.000.000.");
+        }
+        const result = await databaseClient(req).rpc("cerrar_turno_caja", {
+            p_turno: req.body.turnoId,
+            p_monto_cierre: montoCierre
+        });
+        return res.json(dataOrThrow(result));
     } catch (error) {
         return handleError(res, error);
     }
@@ -573,16 +664,7 @@ router.post("/ventas", async (req, res) => {
         let pedidoId = req.body?.pedidoId;
         let paymentId;
         if (!pedidoId && Array.isArray(req.body?.items)) {
-            const items = req.body.items;
-            if (items.length === 0 || items.length > 50) throw new ApiError(400, "El pedido debe incluir entre 1 y 50 productos.");
-            const normalizedItems = items.map((item) => {
-                const cantidad = Number(item?.cantidad);
-                if (typeof item?.varianteId !== "string" || !/^[0-9a-f-]{36}$/i.test(item.varianteId)
-                    || !Number.isInteger(cantidad) || cantidad < 1 || cantidad > 99) {
-                    throw new ApiError(400, "Cada producto debe tener una variante válida y cantidad de 1 a 99.");
-                }
-                return { varianteId: item.varianteId, cantidad };
-            });
+            const normalizedItems = normalizarItems(req.body.items);
             const created = dataOrThrow(await client.rpc("crear_pedido_y_cobrar", {
                 p_items: normalizedItems,
                 p_metodo: metodo,
@@ -625,16 +707,32 @@ router.post("/ventas", async (req, res) => {
 
 router.get("/reportes/ventas-dia", async (req, res) => {
     try {
-        const today = new Date().toISOString().slice(0, 10);
+        const dateParts = new Intl.DateTimeFormat("en-CA", {
+            timeZone: "America/La_Paz",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit"
+        }).formatToParts(new Date());
+        const dateValues = Object.fromEntries(dateParts.map(({ type, value }) => [type, value]));
+        const through = `${dateValues.year}-${dateValues.month}-${dateValues.day}`;
+        const today = new Date(`${through}T00:00:00Z`);
+        const start = new Date(today);
+        start.setUTCDate(start.getUTCDate() - 6);
+        const from = start.toISOString().slice(0, 10);
         const result = await databaseClient(req)
             .from("vw_ventas_diarias")
             .select("dia,pedidos,total_vendido")
-            .eq("dia", today);
+            .gte("dia", from)
+            .lte("dia", through)
+            .order("dia");
         const rows = dataOrThrow(result);
+        const todayRows = rows.filter((row) => String(row.dia).slice(0, 10) === through);
         return res.json({
-            fecha: today,
-            total: rows.reduce((sum, row) => sum + Number(row.total_vendido), 0),
-            pedidos: rows.reduce((sum, row) => sum + Number(row.pedidos), 0),
+            fecha: through,
+            total: todayRows.reduce((sum, row) => sum + Number(row.total_vendido), 0),
+            pedidos: todayRows.reduce((sum, row) => sum + Number(row.pedidos), 0),
+            totalPeriodo: rows.reduce((sum, row) => sum + Number(row.total_vendido), 0),
+            pedidosPeriodo: rows.reduce((sum, row) => sum + Number(row.pedidos), 0),
             ventas: rows
         });
     } catch (error) {

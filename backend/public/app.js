@@ -6,6 +6,10 @@ let orderSequence = 1;
 let todaySales = 0;
 let toastTimeout;
 let currentUser = null;
+let productBeingCustomized = null;
+let activeShift = null;
+let shiftLoadError = null;
+let orderPolling = null;
 
 const categoryFilters = document.querySelector("#category-filters");
 const productGrid = document.querySelector("#product-grid");
@@ -15,9 +19,10 @@ const paymentDialog = document.querySelector("#payment-dialog");
 const loginView = document.querySelector("#login-view");
 const appView = document.querySelector("#app-view");
 const selectedVariants = new Map();
+const customizeDialog = document.querySelector("#customize-dialog");
 
 function formatMoney(value) {
-    return `Bs ${value.toFixed(2).replace(".", ",")}`;
+    return `Bs ${Number(value || 0).toFixed(2).replace(".", ",")}`;
 }
 
 function escapeHtml(value) {
@@ -49,7 +54,7 @@ async function requestJson(url, options) {
     }
     const data = await response.json().catch(() => null);
     if (response.status === 401 && currentUser) showLogin("Tu sesión expiró. Inicia sesión nuevamente.");
-    if (!response.ok) throw new Error(data?.mensaje || "No se pudo completar la solicitud");
+    if (!response.ok) throw new Error(data?.mensaje || `Error HTTP ${response.status}: ${response.statusText || "solicitud fallida"}`);
     return data;
 }
 
@@ -90,9 +95,88 @@ async function loadTodayStats() {
         const report = await requestJson("/api/reportes/ventas-dia");
         document.querySelector("#sales-total").textContent = formatMoney(Number(report.total || 0));
         document.querySelector("#orders-count").textContent = String(report.pedidos || 0);
+        try {
+            const preparing = await requestJson("/api/pedidos?estado=EN_PREPARACION");
+            document.querySelector("#preparing-count").innerHTML = `${preparing.length} <small>pedidos</small>`;
+        } catch {
+            document.querySelector("#preparing-count").innerHTML = "— <small>pedidos</small>";
+        }
         document.querySelector("#connection-badge").innerHTML = "<span></span> API CONECTADA";
+        const analytics = document.querySelector("#analytics-panel");
+        analytics.hidden = currentUser?.rol !== "ADMIN";
+        if (currentUser?.rol === "ADMIN") {
+            renderSalesChart(report.ventas || [], report.fecha);
+            try {
+                const bestSellers = await requestJson("/api/reportes/mas-vendidos");
+                document.querySelector("#best-sellers").innerHTML = bestSellers.length
+                    ? bestSellers.slice(0, 5).map((item) => `<li><span><strong>${escapeHtml(item.nombre)}</strong><small>${item.cantidad} unidades</small></span><b>${formatMoney(item.ingresos)}</b></li>`).join("")
+                    : `<li class="chart-empty">Aún no hay ventas registradas.</li>`;
+            } catch (error) {
+                document.querySelector("#best-sellers").innerHTML = `<li class="chart-empty">${escapeHtml(error.message)}</li>`;
+            }
+        }
     } catch {
         document.querySelector("#connection-badge").innerHTML = "<span></span> API SIN CONEXION";
+    }
+}
+
+function renderSalesChart(rows, through) {
+    const valuesByDay = new Map();
+    rows.forEach((row) => {
+        const key = String(row.dia).slice(0, 10);
+        valuesByDay.set(key, (valuesByDay.get(key) || 0) + Number(row.total_vendido));
+    });
+    const today = new Date(`${through}T00:00:00Z`);
+    const days = Array.from({ length: 7 }, (_, index) => {
+        const date = new Date(today);
+        date.setUTCDate(date.getUTCDate() - (6 - index));
+        const key = date.toISOString().slice(0, 10);
+        return { key, total: valuesByDay.get(key) || 0, label: new Intl.DateTimeFormat("es-BO", { weekday: "short", timeZone: "UTC" }).format(date) };
+    });
+    const max = Math.max(1, ...days.map((day) => day.total));
+    document.querySelector("#sales-chart").innerHTML = days.map((day) => {
+        const level = day.total ? Math.max(1, Math.ceil(day.total / max * 10)) : 0;
+        return `<div class="chart-day" title="${escapeHtml(day.label)}: ${formatMoney(day.total)}"><span class="chart-value">${day.total ? formatMoney(day.total) : "—"}</span><span class="chart-track"><i class="chart-bar level-${level}"></i></span><span class="chart-label">${escapeHtml(day.label)}</span></div>`;
+    }).join("");
+}
+
+async function loadInventoryAlerts() {
+    const badge = document.querySelector("#inventory-badge");
+    if (!badge || !currentUser || !["ADMIN", "MENU_STAFF"].includes(currentUser.rol)) return;
+    try {
+        const alerts = await requestJson("/api/insumos/alertas/stock-bajo");
+        badge.textContent = alerts.length > 99 ? "99+" : String(alerts.length);
+        badge.hidden = alerts.length === 0;
+    } catch {
+        badge.hidden = true;
+    }
+}
+
+function renderShift(shift) {
+    const isOpen = Boolean(shift && shift.estado === "ABIERTO");
+    document.querySelector("#shift-state").textContent = isOpen ? "Turno abierto" : "Sin turno abierto";
+    document.querySelector("#shift-time").textContent = isOpen ? `Apertura: ${new Date(shift.apertura).toLocaleString("es-BO")}` : "Abre un turno para registrar ventas desde caja.";
+    document.querySelector("#shift-opening-total").textContent = formatMoney(Number(shift?.monto_inicial || 0));
+    document.querySelector("#shift-sales-total").textContent = formatMoney(Number(shift?.total_vendido || 0));
+    document.querySelector("#shift-expected-total").textContent = formatMoney(Number(shift?.monto_esperado || shift?.monto_inicial || 0));
+    document.querySelector("#shift-open-form").hidden = isOpen;
+    document.querySelector("#shift-close-form").hidden = !isOpen;
+    renderCart();
+}
+
+async function loadCashShift() {
+    if (!currentUser || !["ADMIN", "CASHIER"].includes(currentUser.rol)) return null;
+    try {
+        activeShift = await requestJson("/api/caja/turno");
+        shiftLoadError = null;
+        renderShift(activeShift);
+        return activeShift;
+    } catch (error) {
+        activeShift = null;
+        shiftLoadError = error;
+        renderShift(null);
+        if (currentRoute() === "/turno") document.querySelector("#shift-error").textContent = error.message;
+        return null;
     }
 }
 
@@ -134,8 +218,7 @@ function renderProducts() {
                 <div class="product-info">
                     <div class="product-name-row"><h3 class="product-name">${escapeHtml(product.name)}</h3><span class="product-price" data-price-for="${escapeHtml(product.id)}">Bs ${product.price}</span></div>
                     <p class="product-description">${escapeHtml(product.description)}</p>
-                    ${product.variants.length > 1 ? `<label class="variant-picker">Tamaño<select data-variant-for="${escapeHtml(product.id)}">${product.variants.map((variant) => `<option value="${escapeHtml(variant.id)}" data-price="${variant.price}" ${variant.id === (selectedVariants.get(product.id) || product.variants[0].id) ? "selected" : ""}>${escapeHtml(variant.size)} · Bs ${variant.price}</option>`).join("")}</select></label>` : ""}
-                    <button class="add-button" type="button" data-add="${escapeHtml(product.id)}" ${product.variants.length ? "" : "disabled"}><span>${product.variants.length ? "Agregar al pedido" : "No disponible"}</span><span aria-hidden="true">+</span></button>
+                    <button class="add-button" type="button" data-customize="${escapeHtml(product.id)}" ${product.variants.length ? "" : "disabled"}><span>${product.variants.length ? "Personalizar y agregar" : "No disponible"}</span><span aria-hidden="true">+</span></button>
                 </div>
             </article>
         `).join("")
@@ -143,19 +226,20 @@ function renderProducts() {
 }
 
 function renderCart() {
-    const entries = [...cart.values()];
-    const count = entries.reduce((total, item) => total + item.quantity, 0);
-    const total = entries.reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
+    const entries = [...cart.entries()];
+    const values = entries.map(([, item]) => item);
+    const count = values.reduce((total, item) => total + item.quantity, 0);
+    const total = values.reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
 
-    cartItems.innerHTML = entries.length ? entries.map(({ product, variant, quantity }) => `
+    cartItems.innerHTML = entries.length ? entries.map(([key, { product, variant, quantity, options }]) => `
         <div class="cart-row">
             <div>
                 <p class="cart-product-name">${escapeHtml(product.name)}${variant.size !== "UNICO" ? ` · ${escapeHtml(variant.size)}` : ""}</p>
-                <span class="cart-product-meta">${formatMoney(variant.price)} c/u</span>
+                <span class="cart-product-meta">${formatMoney(variant.price)} c/u${options.leche ? ` · Leche ${escapeHtml(options.leche.toLocaleLowerCase("es"))}` : ""}${options.agregados?.length ? ` · ${escapeHtml(options.agregados.map((value) => value.toLocaleLowerCase("es")).join(", "))}` : ""}</span>
                 <div class="quantity-control" aria-label="Cantidad de ${product.name}">
-                    <button type="button" data-quantity="${escapeHtml(variant.id)}" data-change="-1" aria-label="Quitar una unidad de ${escapeHtml(product.name)}">−</button>
+                    <button type="button" data-quantity="${escapeHtml(key)}" data-change="-1" aria-label="Quitar una unidad de ${escapeHtml(product.name)}">−</button>
                     <span>${quantity}</span>
-                    <button type="button" data-quantity="${escapeHtml(variant.id)}" data-change="1" aria-label="Agregar una unidad de ${escapeHtml(product.name)}">+</button>
+                    <button type="button" data-quantity="${escapeHtml(key)}" data-change="1" aria-label="Agregar una unidad de ${escapeHtml(product.name)}">+</button>
                 </div>
             </div>
             <strong class="cart-product-total">${formatMoney(variant.price * quantity)}</strong>
@@ -191,25 +275,40 @@ categoryFilters.addEventListener("click", (event) => {
 searchInput.addEventListener("input", renderProducts);
 
 productGrid.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-add]");
+    const button = event.target.closest("[data-customize]");
     if (!button) return;
-    const product = products.find((item) => item.id === button.dataset.add);
-    const selectedVariantId = selectedVariants.get(product.id) || product.variants[0]?.id;
-    const variant = product.variants.find((item) => item.id === selectedVariantId);
-    if (!variant) return showToast("Este producto no tiene una variante disponible.");
-    const current = cart.get(variant.id);
-    cart.set(variant.id, { product, variant, quantity: (current?.quantity || 0) + 1 });
-    renderCart();
+    const product = products.find((item) => item.id === button.dataset.customize);
+    if (!product?.variants.length) return showToast("Este producto no tiene una variante disponible.");
+    productBeingCustomized = product;
+    document.querySelector("#customize-title").textContent = product.name;
+    document.querySelector("#customize-description").textContent = product.description;
+    const sizeSelect = document.querySelector("#customize-size");
+    sizeSelect.innerHTML = product.variants.map((variant) => `<option value="${escapeHtml(variant.id)}">${escapeHtml(({ P: "Pequeño", M: "Mediano", G: "Grande", UNICO: "Único" })[variant.size] || variant.size)} · ${formatMoney(variant.price)}</option>`).join("");
+    document.querySelector("#customize-size-field").hidden = product.variants.length === 1;
+    document.querySelector("#coffee-options").hidden = !product.category.toLocaleLowerCase("es").includes("caf");
+    document.querySelector("#customize-milk").value = "";
+    document.querySelectorAll('input[name="agregado"]').forEach((input) => { input.checked = false; });
+    document.querySelector("#customize-error").textContent = "";
+    customizeDialog.showModal();
 });
 
-productGrid.addEventListener("change", (event) => {
-    const select = event.target.closest("[data-variant-for]");
-    if (!select) return;
-    const productId = select.dataset.variantFor;
-    selectedVariants.set(productId, select.value);
-    const price = Number(select.selectedOptions[0]?.dataset.price);
-    const priceLabel = productGrid.querySelector(`[data-price-for="${CSS.escape(productId)}"]`);
-    if (priceLabel && Number.isFinite(price)) priceLabel.textContent = `Bs ${price}`;
+document.querySelector("#customize-form").addEventListener("submit", (event) => {
+    if (event.submitter?.value !== "confirm") return;
+    event.preventDefault();
+    if (!productBeingCustomized) return;
+    const variant = productBeingCustomized.variants.find((item) => item.id === document.querySelector("#customize-size").value);
+    if (!variant) return;
+    const options = {
+        ...(document.querySelector("#customize-milk").value ? { leche: document.querySelector("#customize-milk").value } : {}),
+        agregados: [...document.querySelectorAll('input[name="agregado"]:checked')].map((input) => input.value)
+    };
+    const key = `${variant.id}|${options.leche || ""}|${options.agregados.join(",")}`;
+    const current = cart.get(key);
+    cart.set(key, { product: productBeingCustomized, variant, quantity: (current?.quantity || 0) + 1, options });
+    selectedVariants.set(productBeingCustomized.id, variant.id);
+    customizeDialog.close();
+    productBeingCustomized = null;
+    renderCart();
 });
 
 cartItems.addEventListener("click", (event) => {
@@ -228,14 +327,66 @@ document.querySelector("#clear-order").addEventListener("click", () => {
     renderCart();
 });
 
-document.querySelector("#checkout-button").addEventListener("click", () => paymentDialog.showModal());
+document.querySelector("#checkout-button").addEventListener("click", async () => {
+    await loadCashShift();
+    if (!activeShift) {
+        showToast(shiftLoadError
+            ? `No se pudo verificar el turno: ${shiftLoadError.message}`
+            : "Primero abre el turno de caja.");
+        window.location.hash = "#/turno";
+        return;
+    }
+    updatePaymentFields();
+    paymentDialog.showModal();
+});
+
+function updatePaymentFields() {
+    const method = document.querySelector('input[name="payment"]:checked')?.value;
+    const cashField = document.querySelector("#cash-received-field");
+    const changeLine = document.querySelector("#change-line");
+    const total = [...cart.values()].reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
+    cashField.hidden = method !== "EFECTIVO";
+    changeLine.hidden = method !== "EFECTIVO";
+    const received = Number(document.querySelector("#cash-received").value);
+    const change = received - total;
+    document.querySelector("#cash-change").textContent = change >= 0 ? formatMoney(change) : `Faltan ${formatMoney(Math.abs(change))}`;
+    document.querySelector("#cash-change").classList.toggle("change-short", change < 0 && received > 0);
+}
+
+document.querySelectorAll('input[name="payment"]').forEach((input) => input.addEventListener("change", updatePaymentFields));
+document.querySelector("#cash-received").addEventListener("input", updatePaymentFields);
+
+function showTicket(result, paymentMethod, received, change) {
+    const order = result.pedido;
+    const lines = (order.items || []).map((item) => {
+        const options = item.opciones || {};
+        const extras = [options.leche, ...(options.agregados || [])].filter(Boolean).join(", ");
+        return `<div class="receipt-item"><span>${item.cantidad} × ${escapeHtml(item.nombre)}${item.tamano && item.tamano !== "UNICO" ? ` · ${escapeHtml(item.tamano)}` : ""}${extras ? `<small>${escapeHtml(extras)}</small>` : ""}</span><strong>${formatMoney(Number(item.subtotal))}</strong></div>`;
+    }).join("");
+    document.querySelector("#receipt-content").innerHTML = `
+        <p class="receipt-brand">MOKA · CAFETERÍA</p><p class="receipt-meta">Pedido ${escapeHtml(order.id)}<br>${new Date(result.venta.fecha).toLocaleString("es-BO")}</p>
+        <div class="receipt-lines">${lines}</div><div class="receipt-total"><span>Total</span><strong>${formatMoney(Number(result.venta.monto))}</strong></div>
+        <p class="receipt-meta">Pago: ${escapeHtml(paymentMethod)}${paymentMethod === "EFECTIVO" ? `<br>Recibido: ${formatMoney(received)}<br>Cambio: ${formatMoney(change)}` : ""}</p>
+        <p class="receipt-thanks">Gracias por tu visita</p>`;
+    document.querySelector("#ticket-dialog").showModal();
+}
+
+document.querySelector("#close-ticket").addEventListener("click", () => document.querySelector("#ticket-dialog").close());
+document.querySelector("#ticket-done").addEventListener("click", () => document.querySelector("#ticket-dialog").close());
+document.querySelector("#print-ticket").addEventListener("click", () => window.print());
 
 document.querySelector("#payment-form").addEventListener("submit", async (event) => {
     if (event.submitter?.value !== "confirm") return;
     event.preventDefault();
     const total = [...cart.values()].reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
     const paymentMethod = new FormData(event.currentTarget).get("payment");
-    const items = [...cart.values()].map(({ variant, quantity }) => ({ varianteId: variant.id, cantidad: quantity }));
+    const received = Number(document.querySelector("#cash-received").value);
+    if (!activeShift) return showToast("Abre tu turno de caja antes de cobrar.");
+    if (paymentMethod === "EFECTIVO" && (!Number.isFinite(received) || received < total)) {
+        document.querySelector("#cash-received").focus();
+        return showToast("El dinero recibido debe cubrir el total del pedido.");
+    }
+    const items = [...cart.values()].map(({ variant, quantity, options }) => ({ varianteId: variant.id, cantidad: quantity, opciones: options }));
     const confirmButton = document.querySelector("#confirm-payment");
     confirmButton.disabled = true;
     try {
@@ -245,16 +396,14 @@ document.querySelector("#payment-form").addEventListener("submit", async (event)
             body: JSON.stringify({ metodo: paymentMethod, items })
         });
         const paidTotal = Number(result.venta.monto);
-        todaySales += paidTotal;
-        orderSequence += 1;
-        document.querySelector("#sales-total").textContent = formatMoney(todaySales);
-        document.querySelector("#orders-count").textContent = String(orderSequence - 1);
-        document.querySelector("#preparing-count").innerHTML = `${orderSequence - 1} <small>pedidos</small>`;
+        const change = paymentMethod === "EFECTIVO" ? received - paidTotal : 0;
         cart.clear();
         renderCart();
         document.querySelector("#order-number").textContent = `#${result.pedido.id.slice(-6).toUpperCase()}`;
         paymentDialog.close();
         showToast(`Cobro de ${formatMoney(paidTotal)} registrado como ${paymentMethod}.`);
+        showTicket(result, paymentMethod, received, change);
+        await Promise.all([loadTodayStats(), loadOrders(), loadInventoryAlerts(), loadCashShift()]);
     } catch (error) {
         showToast(error.message);
     } finally {
@@ -263,16 +412,27 @@ document.querySelector("#payment-form").addEventListener("submit", async (event)
 });
 
 document.addEventListener("keydown", (event) => {
-    if (event.key === "/" && document.activeElement !== searchInput) {
+    if (appView.hidden) return;
+    if (event.key === "F2") {
+        event.preventDefault();
+        if (!document.querySelector("dialog[open]") && cart.size) document.querySelector("#checkout-button").click();
+    } else if (event.key === "F4") {
+        event.preventDefault();
+        searchInput.focus();
+    } else if (event.key === "Escape" && !document.querySelector("dialog[open]") && cart.size) {
+        cart.clear();
+        renderCart();
+        showToast("Pedido vaciado.");
+    } else if (event.key === "/" && document.activeElement !== searchInput) {
         event.preventDefault();
         searchInput.focus();
     }
 });
 
-const routeNames = { "/": "Punto de venta", "/pedidos": "Pedidos", "/productos": "Productos", "/categorias": "Categorías", "/inventario": "Inventario" };
+const routeNames = { "/": "Punto de venta", "/pedidos": "Pedidos", "/turno": "Turno de caja", "/productos": "Productos", "/categorias": "Categorías", "/inventario": "Inventario" };
 const routesByRole = {
     ADMIN: Object.keys(routeNames),
-    CASHIER: ["/", "/pedidos"],
+    CASHIER: ["/", "/pedidos", "/turno"],
     BARISTA: ["/pedidos"],
     MENU_STAFF: ["/productos", "/categorias", "/inventario"]
 };
@@ -280,6 +440,10 @@ const roleNames = { ADMIN: "Administrador", MENU_STAFF: "Personal de menú", CAS
 
 function showLogin(message = "") {
     currentUser = null;
+    activeShift = null;
+    cart.clear();
+    clearInterval(orderPolling);
+    orderPolling = null;
     appView.hidden = true;
     loginView.hidden = false;
     document.querySelector("#login-error").textContent = message;
@@ -292,7 +456,9 @@ function showApp(user) {
     loginView.hidden = true;
     appView.hidden = false;
     document.querySelector("#user-name").textContent = user.nombre;
+    document.querySelector("#page-title").textContent = `Hola, ${user.nombre}.`;
     document.querySelector("#user-role").textContent = roleNames[user.rol];
+    document.querySelector("#analytics-panel").hidden = user.rol !== "ADMIN";
     document.querySelector("#user-avatar").textContent = user.nombre
         .split(/\s+/)
         .filter(Boolean)
@@ -311,6 +477,8 @@ function showApp(user) {
     renderCart();
     loadProducts();
     if (["ADMIN", "CASHIER"].includes(user.rol)) loadTodayStats();
+    if (["ADMIN", "CASHIER"].includes(user.rol)) loadCashShift();
+    if (["ADMIN", "MENU_STAFF"].includes(user.rol)) loadInventoryAlerts();
 }
 
 function currentRoute() {
@@ -327,6 +495,7 @@ function updateRoute() {
     document.querySelector(".pos-layout").hidden = route !== "/";
     document.querySelector(".welcome-row").hidden = route !== "/";
     document.querySelector(".quick-stats").hidden = route !== "/";
+    document.querySelector("#analytics-panel").hidden = route !== "/" || currentUser?.rol !== "ADMIN";
     document.querySelector(".menu-section")?.closest(".pos-layout");
     document.querySelectorAll(".nav-link[data-route]").forEach((link) => {
         const active = link.dataset.route === route;
@@ -335,14 +504,22 @@ function updateRoute() {
     });
     document.querySelector(".breadcrumb strong").textContent = routeNames[route];
     if (route === "/pedidos") loadOrders();
+    if (route === "/turno") loadCashShift();
     if (route === "/productos") loadAdminProducts();
     if (route === "/categorias") loadCategories();
     if (route === "/inventario") loadInventory();
+    syncOrderPolling();
 }
 
 async function loadOrders(status = "TODOS") {
     try {
-        const query = status === "TODOS" ? "" : `?estado=${encodeURIComponent(status)}`;
+        const kitchenMode = currentUser?.rol === "BARISTA";
+        const selectedStatus = kitchenMode ? "EN_PREPARACION" : status;
+        const query = selectedStatus === "TODOS" ? "" : `?estado=${encodeURIComponent(selectedStatus)}`;
+        document.querySelector("#orders-description").textContent = kitchenMode
+            ? "Pedidos en preparación. La lista se actualiza automáticamente."
+            : "Controla el flujo de cada pedido hasta la entrega.";
+        document.querySelector("#order-filters").hidden = kitchenMode;
         const orders = await requestJson(`/api/pedidos${query}`);
         document.querySelector("#orders-table").innerHTML = orders.length ? orders.map((order) => {
             const next = { PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO", LISTO: "ENTREGADO" }[order.estado];
@@ -351,10 +528,23 @@ async function loadOrders(status = "TODOS") {
                 : next
                     ? `<button class="table-button" data-advance="${escapeHtml(order.id)}" data-next="${next}">Avanzar</button>`
                     : "-";
-            return `<tr><td data-label="Pedido"><strong>${escapeHtml(order.id)}</strong></td><td data-label="Fecha">${new Date(order.fecha).toLocaleString("es-BO")}</td><td data-label="Total">${formatMoney(Number(order.total))}</td><td data-label="Estado"><span class="status-badge status-${escapeHtml(order.estado.toLowerCase())}">${escapeHtml(order.estado.replaceAll("_", " "))}</span></td><td data-label="Acción">${action}</td></tr>`;
+            const contents = (order.items || []).map((item) => {
+                const options = item.opciones || {};
+                const extras = [options.leche, ...(options.agregados || [])].filter(Boolean).join(", ");
+                return `${item.cantidad} × ${escapeHtml(item.nombre || "Producto")}${item.tamano && item.tamano !== "UNICO" ? ` · ${escapeHtml(item.tamano)}` : ""}${extras ? `<br><small>${escapeHtml(extras)}</small>` : ""}`;
+            }).join("<br>");
+            return `<tr><td data-label="Pedido"><strong>#${escapeHtml(order.id.slice(-6).toUpperCase())}</strong><small>${contents || "Sin detalle"}</small></td><td data-label="Fecha">${new Date(order.fecha).toLocaleString("es-BO")}</td><td data-label="Total">${formatMoney(Number(order.total))}</td><td data-label="Estado"><span class="status-badge status-${escapeHtml(order.estado.toLowerCase())}">${escapeHtml(order.estado.replaceAll("_", " "))}</span></td><td data-label="Acción">${action}</td></tr>`;
         }).join("") : `<tr><td colspan="5" class="table-empty">Aún no hay pedidos registrados.</td></tr>`;
     } catch (error) {
         document.querySelector("#orders-table").innerHTML = `<tr><td colspan="5" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
+    }
+}
+
+function syncOrderPolling() {
+    clearInterval(orderPolling);
+    orderPolling = null;
+    if (currentUser?.rol === "BARISTA" && currentRoute() === "/pedidos") {
+        orderPolling = setInterval(() => loadOrders("EN_PREPARACION"), 5000);
     }
 }
 
@@ -384,8 +574,13 @@ async function loadCategories() {
 
 async function loadInventory() {
     try {
-        const list = await requestJson("/api/insumos");
-        const alerts = list.filter((item) => item.stock <= item.stockMinimo);
+        const [list, alerts] = await Promise.all([
+            requestJson("/api/insumos"),
+            requestJson("/api/insumos/alertas/stock-bajo")
+        ]);
+        const badge = document.querySelector("#inventory-badge");
+        badge.textContent = alerts.length > 99 ? "99+" : String(alerts.length);
+        badge.hidden = alerts.length === 0;
         document.querySelector("#inventory-alert").textContent = alerts.length ? `${alerts.length} insumo(s) necesitan reposición.` : "Inventario saludable: no hay alertas de stock.";
         document.querySelector("#inventory-table").innerHTML = list.length
             ? list.map((item) => `<tr><td data-label="Insumo"><strong>${escapeHtml(item.nombre)}</strong></td><td data-label="Unidad">${escapeHtml(item.unidad)}</td><td data-label="Stock actual"><span class="${item.stock <= item.stockMinimo ? "low-stock" : ""}">${item.stock}</span></td><td data-label="Mínimo">${item.stockMinimo}</td><td data-label="Acciones"><button class="table-button" data-buy-supply="${escapeHtml(item.id)}">Registrar compra</button></td></tr>`).join("")
@@ -395,6 +590,52 @@ async function loadInventory() {
         document.querySelector("#inventory-table").innerHTML = `<tr><td colspan="5" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
     }
 }
+
+document.querySelector("#shift-open-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = document.querySelector("#shift-open-button");
+    const error = document.querySelector("#shift-error");
+    error.textContent = "";
+    button.disabled = true;
+    try {
+        await requestJson("/api/caja/turno/abrir", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ montoInicial: Number(document.querySelector("#shift-opening-amount").value) })
+        });
+        await loadCashShift();
+        document.querySelector("#shift-result").textContent = "Turno abierto. Las ventas se registrarán en esta caja.";
+        showToast("Turno de caja abierto.");
+    } catch (requestError) {
+        error.textContent = requestError.message;
+    } finally {
+        button.disabled = false;
+    }
+});
+
+document.querySelector("#shift-close-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!activeShift) return;
+    const button = document.querySelector("#shift-close-button");
+    const error = document.querySelector("#shift-error");
+    error.textContent = "";
+    button.disabled = true;
+    try {
+        const result = await requestJson("/api/caja/turno/cerrar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ turnoId: activeShift.id, montoCierre: Number(document.querySelector("#shift-closing-amount").value) })
+        });
+        activeShift = null;
+        renderShift(null);
+        document.querySelector("#shift-result").textContent = `Cierre registrado · vendido ${formatMoney(result.totalVendido)} · diferencia ${formatMoney(result.diferencia)}.`;
+        showToast("Turno cerrado correctamente.");
+    } catch (requestError) {
+        error.textContent = requestError.message;
+    } finally {
+        button.disabled = false;
+    }
+});
 
 window.addEventListener("hashchange", updateRoute);
 document.querySelector("#refresh-orders").addEventListener("click", async () => { await loadOrders(); showToast("Lista de pedidos actualizada."); });
