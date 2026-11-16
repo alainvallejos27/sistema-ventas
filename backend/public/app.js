@@ -8,7 +8,6 @@ let toastTimeout;
 let currentUser = null;
 let productBeingCustomized = null;
 let activeShift = null;
-let shiftLoadError = null;
 let orderPolling = null;
 
 const categoryFilters = document.querySelector("#category-filters");
@@ -23,6 +22,12 @@ const customizeDialog = document.querySelector("#customize-dialog");
 
 function formatMoney(value) {
     return `Bs ${Number(value || 0).toFixed(2).replace(".", ",")}`;
+}
+
+function parseCashAmount(value) {
+    const normalized = String(value).trim().replace(",", ".");
+    if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return Number.NaN;
+    return Number(normalized);
 }
 
 function escapeHtml(value) {
@@ -154,9 +159,13 @@ async function loadInventoryAlerts() {
 
 function renderShift(shift) {
     const isOpen = Boolean(shift && shift.estado === "ABIERTO");
-    document.querySelector("#shift-state").textContent = isOpen ? "Turno abierto" : "Sin turno abierto";
-    document.querySelector("#shift-time").textContent = isOpen ? `Apertura: ${new Date(shift.apertura).toLocaleString("es-BO")}` : "Abre un turno para registrar ventas desde caja.";
+    const shiftName = shift?.tipo_turno === "TARDE" ? "tarde" : "mañana";
+    document.querySelector("#shift-state").textContent = isOpen ? `Turno de la ${shiftName} abierto` : "Sin turno abierto";
+    document.querySelector("#shift-time").textContent = isOpen ? `Apertura: ${new Date(shift.apertura).toLocaleString("es-BO")}` : "Abre un turno de mañana o tarde para registrar ventas desde caja.";
     document.querySelector("#shift-opening-total").textContent = formatMoney(Number(shift?.monto_inicial || 0));
+    document.querySelector("#shift-cash-total").textContent = formatMoney(Number(shift?.total_efectivo || 0));
+    document.querySelector("#shift-qr-total").textContent = formatMoney(Number(shift?.total_qr || 0));
+    document.querySelector("#shift-card-total").textContent = formatMoney(Number(shift?.total_tarjeta || 0));
     document.querySelector("#shift-sales-total").textContent = formatMoney(Number(shift?.total_vendido || 0));
     document.querySelector("#shift-expected-total").textContent = formatMoney(Number(shift?.monto_esperado || shift?.monto_inicial || 0));
     document.querySelector("#shift-open-form").hidden = isOpen;
@@ -168,15 +177,37 @@ async function loadCashShift() {
     if (!currentUser || !["ADMIN", "CASHIER"].includes(currentUser.rol)) return null;
     try {
         activeShift = await requestJson("/api/caja/turno");
-        shiftLoadError = null;
+        document.querySelector("#shift-error").textContent = "";
         renderShift(activeShift);
         return activeShift;
     } catch (error) {
-        activeShift = null;
-        shiftLoadError = error;
-        renderShift(null);
-        if (currentRoute() === "/turno") document.querySelector("#shift-error").textContent = error.message;
-        return null;
+        if (activeShift) renderShift(activeShift);
+        else {
+            renderShift(null);
+            document.querySelector("#shift-state").textContent = "No se pudo verificar el turno";
+            document.querySelector("#shift-time").textContent = "Comprueba la conexión e inténtalo nuevamente.";
+            document.querySelector("#shift-open-form").hidden = true;
+            document.querySelector("#shift-close-form").hidden = true;
+        }
+        document.querySelector("#shift-error").textContent = `No se pudo actualizar la caja: ${error.message}`;
+        return activeShift;
+    }
+}
+
+async function loadAdminShifts() {
+    const history = document.querySelector("#admin-shift-history");
+    if (currentUser?.rol !== "ADMIN") {
+        history.hidden = true;
+        return;
+    }
+    history.hidden = false;
+    try {
+        const shifts = await requestJson("/api/caja/turnos");
+        document.querySelector("#admin-shifts-table").innerHTML = shifts.length
+            ? shifts.map((shift) => `<tr><td data-label="Usuario"><strong>${escapeHtml(shift.usuarios?.nombre || shift.usuarios?.correo || "Usuario")}</strong></td><td data-label="Sucursal">${escapeHtml(shift.sucursales?.nombre || "Sucursal")}</td><td data-label="Turno">${shift.tipo_turno === "TARDE" ? "Tarde" : "Mañana"}</td><td data-label="Estado">${escapeHtml(shift.estado)}</td><td data-label="Efectivo">${formatMoney(Number(shift.total_efectivo))}</td><td data-label="QR">${formatMoney(Number(shift.total_qr))}</td><td data-label="Tarjeta">${formatMoney(Number(shift.total_tarjeta))}</td><td data-label="Total vendido">${formatMoney(Number(shift.total_vendido))}</td></tr>`).join("")
+            : `<tr><td colspan="8" class="table-empty">Aún no hay turnos registrados.</td></tr>`;
+    } catch (error) {
+        document.querySelector("#admin-shifts-table").innerHTML = `<tr><td colspan="8" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
     }
 }
 
@@ -328,12 +359,25 @@ document.querySelector("#clear-order").addEventListener("click", () => {
 });
 
 document.querySelector("#checkout-button").addEventListener("click", async () => {
-    await loadCashShift();
-    if (!activeShift) {
-        showToast(shiftLoadError
-            ? `No se pudo verificar el turno: ${shiftLoadError.message}`
-            : "Primero abre el turno de caja.");
-        window.location.hash = "#/turno";
+    if (currentUser?.rol === "CUSTOMER") {
+        const items = [...cart.values()].map(({ variant, quantity, options }) => ({ varianteId: variant.id, cantidad: quantity, opciones: options }));
+        const button = document.querySelector("#checkout-button");
+        button.disabled = true;
+        try {
+            const order = await requestJson("/api/pedidos", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ items })
+            });
+            cart.clear();
+            orderSequence += 1;
+            renderCart();
+            showToast(`Pedido #${order.id.slice(-6).toUpperCase()} enviado. Paga en caja al recogerlo.`);
+        } catch (error) {
+            showToast(error.message);
+        } finally {
+            button.disabled = false;
+        }
         return;
     }
     updatePaymentFields();
@@ -347,10 +391,12 @@ function updatePaymentFields() {
     const total = [...cart.values()].reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
     cashField.hidden = method !== "EFECTIVO";
     changeLine.hidden = method !== "EFECTIVO";
-    const received = Number(document.querySelector("#cash-received").value);
+    const received = parseCashAmount(document.querySelector("#cash-received").value);
     const change = received - total;
-    document.querySelector("#cash-change").textContent = change >= 0 ? formatMoney(change) : `Faltan ${formatMoney(Math.abs(change))}`;
-    document.querySelector("#cash-change").classList.toggle("change-short", change < 0 && received > 0);
+    document.querySelector("#cash-change").textContent = Number.isFinite(received)
+        ? change >= 0 ? formatMoney(change) : `Faltan ${formatMoney(Math.abs(change))}`
+        : "Escribe el monto recibido";
+    document.querySelector("#cash-change").classList.toggle("change-short", Number.isFinite(received) && change < 0);
 }
 
 document.querySelectorAll('input[name="payment"]').forEach((input) => input.addEventListener("change", updatePaymentFields));
@@ -380,11 +426,10 @@ document.querySelector("#payment-form").addEventListener("submit", async (event)
     event.preventDefault();
     const total = [...cart.values()].reduce((sum, item) => sum + item.variant.price * item.quantity, 0);
     const paymentMethod = new FormData(event.currentTarget).get("payment");
-    const received = Number(document.querySelector("#cash-received").value);
-    if (!activeShift) return showToast("Abre tu turno de caja antes de cobrar.");
+    const received = parseCashAmount(document.querySelector("#cash-received").value);
     if (paymentMethod === "EFECTIVO" && (!Number.isFinite(received) || received < total)) {
         document.querySelector("#cash-received").focus();
-        return showToast("El dinero recibido debe cubrir el total del pedido.");
+        return showToast("Escribe un monto válido que cubra el total del pedido.");
     }
     const items = [...cart.values()].map(({ variant, quantity, options }) => ({ varianteId: variant.id, cantidad: quantity, opciones: options }));
     const confirmButton = document.querySelector("#confirm-payment");
@@ -396,13 +441,28 @@ document.querySelector("#payment-form").addEventListener("submit", async (event)
             body: JSON.stringify({ metodo: paymentMethod, items })
         });
         const paidTotal = Number(result.venta.monto);
-        const change = paymentMethod === "EFECTIVO" ? received - paidTotal : 0;
+        if (activeShift) {
+            const totalKey = {
+                EFECTIVO: "total_efectivo",
+                QR: "total_qr",
+                TARJETA: "total_tarjeta"
+            }[paymentMethod];
+            activeShift = {
+                ...activeShift,
+                total_vendido: Number(activeShift.total_vendido || 0) + paidTotal,
+                [totalKey]: Number(activeShift[totalKey] || 0) + paidTotal,
+                monto_esperado: Number(activeShift.monto_esperado || activeShift.monto_inicial || 0)
+                    + (paymentMethod === "EFECTIVO" ? paidTotal : 0)
+            };
+            renderShift(activeShift);
+        }
         cart.clear();
+        orderSequence += 1;
         renderCart();
-        document.querySelector("#order-number").textContent = `#${result.pedido.id.slice(-6).toUpperCase()}`;
         paymentDialog.close();
+        document.querySelector("#cash-received").value = "";
+        updatePaymentFields();
         showToast(`Cobro de ${formatMoney(paidTotal)} registrado como ${paymentMethod}.`);
-        showTicket(result, paymentMethod, received, change);
         await Promise.all([loadTodayStats(), loadOrders(), loadInventoryAlerts(), loadCashShift()]);
     } catch (error) {
         showToast(error.message);
@@ -434,9 +494,10 @@ const routesByRole = {
     ADMIN: Object.keys(routeNames),
     CASHIER: ["/", "/pedidos", "/turno"],
     BARISTA: ["/pedidos"],
-    MENU_STAFF: ["/productos", "/categorias", "/inventario"]
+    MENU_STAFF: ["/productos", "/categorias", "/inventario"],
+    CUSTOMER: ["/"]
 };
-const roleNames = { ADMIN: "Administrador", MENU_STAFF: "Personal de menú", CASHIER: "Cajero", BARISTA: "Barista" };
+const roleNames = { ADMIN: "Administrador", MENU_STAFF: "Personal de menú", CASHIER: "Cajero", BARISTA: "Barista", CUSTOMER: "Cliente" };
 
 function showLogin(message = "") {
     currentUser = null;
@@ -459,6 +520,10 @@ function showApp(user) {
     document.querySelector("#page-title").textContent = `Hola, ${user.nombre}.`;
     document.querySelector("#user-role").textContent = roleNames[user.rol];
     document.querySelector("#analytics-panel").hidden = user.rol !== "ADMIN";
+    document.querySelector("#quick-stats").hidden = user.rol !== "ADMIN";
+    document.querySelector(".welcome-row").hidden = user.rol === "CUSTOMER";
+    document.querySelector("#checkout-button-label").textContent = user.rol === "CUSTOMER" ? "Enviar pedido" : "Cobrar pedido";
+    document.querySelector("#secure-note").hidden = user.rol === "CUSTOMER";
     document.querySelector("#user-avatar").textContent = user.nombre
         .split(/\s+/)
         .filter(Boolean)
@@ -475,8 +540,8 @@ function showApp(user) {
     updateRoute();
     renderDate();
     renderCart();
-    loadProducts();
-    if (["ADMIN", "CASHIER"].includes(user.rol)) loadTodayStats();
+    if (user.rol !== "BARISTA") loadProducts();
+    if (user.rol === "ADMIN") loadTodayStats();
     if (["ADMIN", "CASHIER"].includes(user.rol)) loadCashShift();
     if (["ADMIN", "MENU_STAFF"].includes(user.rol)) loadInventoryAlerts();
 }
@@ -493,8 +558,8 @@ function updateRoute() {
     }
     document.querySelectorAll("[data-module]").forEach((section) => { section.classList.toggle("visible", section.dataset.module === route.slice(1)); });
     document.querySelector(".pos-layout").hidden = route !== "/";
-    document.querySelector(".welcome-row").hidden = route !== "/";
-    document.querySelector(".quick-stats").hidden = route !== "/";
+    document.querySelector(".welcome-row").hidden = route !== "/" || currentUser?.rol === "CUSTOMER";
+    document.querySelector(".quick-stats").hidden = route !== "/" || currentUser?.rol !== "ADMIN";
     document.querySelector("#analytics-panel").hidden = route !== "/" || currentUser?.rol !== "ADMIN";
     document.querySelector(".menu-section")?.closest(".pos-layout");
     document.querySelectorAll(".nav-link[data-route]").forEach((link) => {
@@ -504,7 +569,10 @@ function updateRoute() {
     });
     document.querySelector(".breadcrumb strong").textContent = routeNames[route];
     if (route === "/pedidos") loadOrders();
-    if (route === "/turno") loadCashShift();
+    if (route === "/turno") {
+        loadCashShift();
+        loadAdminShifts();
+    }
     if (route === "/productos") loadAdminProducts();
     if (route === "/categorias") loadCategories();
     if (route === "/inventario") loadInventory();
@@ -514,16 +582,23 @@ function updateRoute() {
 async function loadOrders(status = "TODOS") {
     try {
         const kitchenMode = currentUser?.rol === "BARISTA";
-        const selectedStatus = kitchenMode ? "EN_PREPARACION" : status;
+        const selectedStatus = kitchenMode ? "TODOS" : status;
         const query = selectedStatus === "TODOS" ? "" : `?estado=${encodeURIComponent(selectedStatus)}`;
         document.querySelector("#orders-description").textContent = kitchenMode
             ? "Pedidos en preparación. La lista se actualiza automáticamente."
             : "Controla el flujo de cada pedido hasta la entrega.";
         document.querySelector("#order-filters").hidden = kitchenMode;
-        const orders = await requestJson(`/api/pedidos${query}`);
+        const responseOrders = await requestJson(`/api/pedidos${query}`);
+        const orders = kitchenMode
+            ? responseOrders.filter((order) => ["PAGADO", "EN_PREPARACION"].includes(order.estado))
+            : responseOrders;
         document.querySelector("#orders-table").innerHTML = orders.length ? orders.map((order) => {
-            const next = { PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO", LISTO: "ENTREGADO" }[order.estado];
-            const action = order.estado === "PENDIENTE"
+            const next = currentUser?.rol === "BARISTA"
+                ? { PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO" }[order.estado]
+                : currentUser?.rol === "ADMIN"
+                    ? { PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO", LISTO: "ENTREGADO" }[order.estado]
+                    : null;
+            const action = order.estado === "PENDIENTE" && ["ADMIN", "CASHIER"].includes(currentUser?.rol)
                 ? `<button class="table-button" data-pay="${escapeHtml(order.id)}">Cobrar en efectivo</button>`
                 : next
                     ? `<button class="table-button" data-advance="${escapeHtml(order.id)}" data-next="${next}">Avanzar</button>`
@@ -565,7 +640,7 @@ async function loadCategories() {
     try {
         const list = await requestJson("/api/categorias");
         document.querySelector("#categories-table").innerHTML = list.length
-            ? list.map((item) => `<tr><td data-label="Nombre"><strong>${escapeHtml(item.nombre)}</strong></td><td data-label="Productos">${item.cantidadProductos}</td><td data-label="Acciones"><button class="table-button" data-delete-category="${encodeURIComponent(item.nombre)}">Eliminar</button></td></tr>`).join("")
+            ? list.map((item) => `<tr><td data-label="Nombre"><strong>${escapeHtml(item.nombre)}</strong></td><td data-label="Productos">${item.cantidadProductos}</td><td data-label="Acciones"><button class="table-button" data-delete-category="${escapeHtml(item.id)}">Eliminar</button></td></tr>`).join("")
             : `<tr><td colspan="3" class="table-empty">No hay categorías registradas.</td></tr>`;
     } catch (error) {
         document.querySelector("#categories-table").innerHTML = `<tr><td colspan="3" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
@@ -598,12 +673,20 @@ document.querySelector("#shift-open-form").addEventListener("submit", async (eve
     error.textContent = "";
     button.disabled = true;
     try {
-        await requestJson("/api/caja/turno/abrir", {
+        const shift = await requestJson("/api/caja/turno/abrir", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ montoInicial: Number(document.querySelector("#shift-opening-amount").value) })
+            body: JSON.stringify({
+                montoInicial: Number(document.querySelector("#shift-opening-amount").value),
+                tipoTurno: document.querySelector("#shift-type").value
+            })
         });
-        await loadCashShift();
+        activeShift = {
+            ...shift,
+            total_vendido: 0,
+            monto_esperado: Number(shift.monto_inicial)
+        };
+        renderShift(activeShift);
         document.querySelector("#shift-result").textContent = "Turno abierto. Las ventas se registrarán en esta caja.";
         showToast("Turno de caja abierto.");
     } catch (requestError) {
@@ -616,6 +699,7 @@ document.querySelector("#shift-open-form").addEventListener("submit", async (eve
 document.querySelector("#shift-close-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!activeShift) return;
+    const closedShiftType = activeShift.tipo_turno;
     const button = document.querySelector("#shift-close-button");
     const error = document.querySelector("#shift-error");
     error.textContent = "";
@@ -628,7 +712,8 @@ document.querySelector("#shift-close-form").addEventListener("submit", async (ev
         });
         activeShift = null;
         renderShift(null);
-        document.querySelector("#shift-result").textContent = `Cierre registrado · vendido ${formatMoney(result.totalVendido)} · diferencia ${formatMoney(result.diferencia)}.`;
+        const shiftName = closedShiftType === "TARDE" ? "tarde" : "mañana";
+        document.querySelector("#shift-result").textContent = `Cierre de ${shiftName} · efectivo ${formatMoney(result.totalEfectivo)} · QR ${formatMoney(result.totalQr)} · tarjeta ${formatMoney(result.totalTarjeta)} · total vendido ${formatMoney(result.totalVendido)} · diferencia ${formatMoney(result.diferencia)}.`;
         showToast("Turno cerrado correctamente.");
     } catch (requestError) {
         error.textContent = requestError.message;
@@ -712,7 +797,7 @@ const categoryDialog = document.querySelector("#category-dialog");
 const categoryForm = document.querySelector("#category-form");
 document.querySelector("#new-category").addEventListener("click", () => { categoryForm.reset(); document.querySelector("#category-error").textContent = ""; categoryDialog.showModal(); document.querySelector("#category-name").focus(); });
 categoryForm.addEventListener("submit", async (event) => { if (event.submitter?.value !== "confirm") return; event.preventDefault(); const formData = new FormData(categoryForm); const nombre = String(formData.get("nombre") || "").trim(); const descripcion = String(formData.get("descripcion") || "").trim(); const error = document.querySelector("#category-error"); if (nombre.length < 2) { error.textContent = "El nombre debe tener al menos 2 caracteres."; return; } const button = document.querySelector("#save-category"); button.disabled = true; try { await requestJson("/api/categorias", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, descripcion }) }); await loadCategories(); categoryDialog.close(); showToast("Categoría creada correctamente."); } catch (requestError) { error.textContent = requestError.message; } finally { button.disabled = false; } });
-document.querySelector("#categories-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-delete-category]"); if (!button || !confirm("¿Eliminar esta categoría?")) return; try { await requestJson(`/api/categorias/${button.dataset.deleteCategory}`, { method: "DELETE" }); await loadCategories(); showToast("Categoría eliminada."); } catch (error) { showToast(error.message); } });
+document.querySelector("#categories-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-delete-category]"); if (!button || !confirm("¿Eliminar esta categoría?")) return; try { await requestJson(`/api/categorias/${encodeURIComponent(button.dataset.deleteCategory)}`, { method: "DELETE" }); await loadCategories(); showToast("Categoría eliminada."); } catch (error) { showToast(error.message); } });
 document.querySelector("#new-supply").addEventListener("click", async () => { const nombre = prompt("Nombre del insumo:"); if (!nombre) return; const unidad = prompt("Unidad:", "kg"); const stock = Number(prompt("Stock actual:", "0")); const stockMinimo = Number(prompt("Stock mínimo:", "0")); if (!unidad || !Number.isFinite(stock) || !Number.isFinite(stockMinimo) || stock < 0 || stockMinimo < 0) return showToast("Completa valores de inventario válidos."); try { await requestJson("/api/insumos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, unidad, stock, stockMinimo }) }); await loadInventory(); showToast("Insumo creado correctamente."); } catch (error) { showToast(error.message); } });
 document.querySelector("#inventory-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-buy-supply]"); if (!button) return; const cantidad = Number(prompt("Cantidad comprada:", "1")); if (!Number.isFinite(cantidad) || cantidad <= 0) return showToast("La cantidad debe ser mayor a 0."); try { await requestJson(`/api/insumos/${button.dataset.buySupply}/compra`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cantidad }) }); await loadInventory(); showToast("Compra registrada correctamente."); } catch (error) { showToast(error.message); } });
 

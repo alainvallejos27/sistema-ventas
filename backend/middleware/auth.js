@@ -8,7 +8,7 @@ const COOKIE_OPTIONS = {
     sameSite: "strict",
     path: "/"
 };
-const STAFF_ROLES = ["ADMIN", "MENU_STAFF", "CASHIER", "BARISTA"];
+const USER_ROLES = ["ADMIN", "MENU_STAFF", "CASHIER", "BARISTA", "CUSTOMER"];
 
 function isSupabaseConfigured() {
     return Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY);
@@ -125,7 +125,7 @@ async function authenticateRequest(req, res, next) {
         console.error("No se pudo consultar el perfil del usuario:", profileError);
         return responderError(res, 503, "No se pudo verificar el perfil del usuario.");
     }
-    if (!profile || !profile.activo || !STAFF_ROLES.includes(profile.rol)) {
+    if (!profile || !profile.activo || !USER_ROLES.includes(profile.rol)) {
         clearSessionCookies(res);
         return responderError(res, 403, "La cuenta no tiene acceso al sistema de ventas.");
     }
@@ -160,7 +160,7 @@ function checkSameOrigin(req, res, next) {
 module.exports = {
     ACCESS_COOKIE,
     REFRESH_COOKIE,
-    STAFF_ROLES,
+    USER_ROLES,
     authenticate,
     checkSameOrigin,
     clearSessionCookies,

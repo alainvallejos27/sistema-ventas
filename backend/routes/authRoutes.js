@@ -50,7 +50,7 @@ router.post("/login", checkSameOrigin, loginLimiter, async (req, res) => {
             console.error("No se pudo consultar el perfil después del inicio de sesión:", profileError);
             return responderError(res, 503, "No se pudo verificar el perfil del usuario.");
         }
-        if (!profile || !profile.activo || !["ADMIN", "MENU_STAFF", "CASHIER", "BARISTA"].includes(profile.rol)) {
+        if (!profile || !profile.activo || !["ADMIN", "MENU_STAFF", "CASHIER", "BARISTA", "CUSTOMER"].includes(profile.rol)) {
             return responderError(res, 403, "La cuenta no tiene acceso al sistema de ventas.");
         }
 

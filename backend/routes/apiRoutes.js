@@ -1,27 +1,44 @@
 const express = require("express");
 const router = express.Router();
-const { authenticate, checkSameOrigin, requireRoles } = require("../middleware/auth");
+const { ACCESS_COOKIE, REFRESH_COOKIE, authenticate, checkSameOrigin, readCookies, requireRoles } = require("../middleware/auth");
+
+function rolesForApiRoute(method, path) {
+    if (method === "GET" && ["/", "/health"].includes(path)) return null;
+    if (method === "GET" && (
+        ["/categorias", "/productos"].includes(path)
+        || /^\/productos\/[^/]+$/.test(path)
+    )) return ["ADMIN", "CASHIER", "MENU_STAFF", "CUSTOMER"];
+
+    if (path === "/pedidos" && method === "GET") return ["ADMIN", "CASHIER", "BARISTA", "CUSTOMER"];
+    if (path === "/pedidos" && method === "POST") return ["ADMIN", "CASHIER", "CUSTOMER"];
+    if (/^\/pedidos\/[^/]+\/estado$/.test(path) && method === "PATCH") return ["ADMIN", "BARISTA"];
+    if (path === "/ventas" && method === "POST") return ["ADMIN", "CASHIER"];
+    if (path === "/caja/turnos" && method === "GET") return ["ADMIN"];
+    if (path.startsWith("/caja/")) return ["ADMIN", "CASHIER"];
+    if (path.startsWith("/reportes/")) return ["ADMIN"];
+    if (["/categorias", "/productos", "/insumos"].includes(path)
+        || path.startsWith("/categorias/")
+        || path.startsWith("/productos/")
+        || path.startsWith("/insumos/")) {
+        if (method === "GET" && (path === "/insumos" || path === "/insumos/alertas/stock-bajo")) {
+            return ["ADMIN", "MENU_STAFF"];
+        }
+        if (method !== "GET") return ["ADMIN", "MENU_STAFF"];
+    }
+
+    return ["ADMIN"];
+}
 
 router.use((req, res, next) => {
-    const publicRead = req.method === "GET" && (
-        ["/", "/health", "/categorias", "/productos"].includes(req.path)
+    const roles = rolesForApiRoute(req.method, req.path);
+    if (roles === null) return next();
+    const catalogRead = req.method === "GET" && (
+        ["/categorias", "/productos"].includes(req.path)
         || /^\/productos\/[^/]+$/.test(req.path)
     );
-    if (publicRead) return next();
-
-    let roles = ["ADMIN"];
-    if (req.path.startsWith("/categorias") || req.path.startsWith("/productos") || req.path.startsWith("/insumos")) {
-        roles = ["ADMIN", "MENU_STAFF"];
-    } else if (req.path === "/pedidos" && req.method === "GET") {
-        roles = ["ADMIN", "MENU_STAFF", "CASHIER", "BARISTA"];
-    } else if (req.path === "/pedidos" && req.method === "POST") {
-        roles = ["ADMIN", "CASHIER"];
-    } else if (req.path.startsWith("/pedidos/") && req.method === "PATCH") {
-        roles = ["ADMIN", "CASHIER", "BARISTA"];
-    } else if (req.path.startsWith("/ventas") || req.path.startsWith("/reportes")) {
-        roles = ["ADMIN", "CASHIER"];
-    } else if (req.path.startsWith("/caja")) {
-        roles = ["ADMIN", "CASHIER"];
+    if (catalogRead) {
+        const cookies = readCookies(req);
+        if (!cookies[ACCESS_COOKIE] && !cookies[REFRESH_COOKIE]) return next();
     }
 
     return checkSameOrigin(req, res, () => authenticate(req, res, () => requireRoles(roles)(req, res, next)));
@@ -493,3 +510,4 @@ router.get("/reportes/mas-vendidos", (req, res) => {
 });
 
 module.exports = router;
+module.exports.rolesForApiRoute = rolesForApiRoute;

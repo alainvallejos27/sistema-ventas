@@ -21,7 +21,7 @@
       </a>
       <p class="eyebrow">SISTEMA DE VENTAS</p>
       <h1 id="login-title">Bienvenido<span>.</span></h1>
-      <p class="login-copy">Inicia sesión con la cuenta de personal de Moka.</p>
+      <p class="login-copy">Inicia sesión con tu cuenta de Moka.</p>
       <form id="login-form">
         <label class="form-field" for="login-email">Correo electrónico
           <input id="login-email" name="correo" type="email" autocomplete="username" maxlength="254" required placeholder="nombre@correo.com">
@@ -73,7 +73,7 @@
           <div class="date-card"><span class="date-day" id="date-day"></span><span class="date-month" id="date-month"></span></div>
         </section>
 
-        <section class="quick-stats" aria-label="Resumen del turno">
+        <section class="quick-stats" id="quick-stats" aria-label="Resumen del turno">
           <div class="stat"><span class="stat-label">VENTAS DE HOY</span><strong id="sales-total">Bs 0</strong><span class="stat-foot"><i class="stat-dot green"></i> Turno en curso</span></div>
           <div class="stat"><span class="stat-label">PEDIDOS</span><strong id="orders-count">0</strong><span class="stat-foot">Desde apertura</span></div>
           <div class="stat stat-note"><span class="stat-label">EN PREPARACION</span><strong id="preparing-count">0 <small>pedidos</small></strong><span class="stat-foot">Se actualiza al cobrar</span></div>
@@ -102,8 +102,8 @@
             <div class="order-bottom">
               <div class="totals-line"><span>Subtotal</span><strong id="subtotal">Bs 0,00</strong></div>
               <div class="totals-line total-line"><span>Total</span><strong id="total">Bs 0,00</strong></div>
-              <button class="checkout-button" id="checkout-button" type="button" disabled><span>Cobrar pedido</span><span aria-hidden="true">↗</span></button>
-              <p class="secure-note"><span>●</span> Confirma manualmente que recibiste el efectivo, QR o pago con tarjeta</p>
+              <button class="checkout-button" id="checkout-button" type="button" disabled><span id="checkout-button-label">Cobrar pedido</span><span aria-hidden="true">↗</span></button>
+              <p class="secure-note" id="secure-note"><span>●</span> Confirma manualmente que recibiste el efectivo, QR o pago con tarjeta</p>
             </div>
           </aside>
         </div>
@@ -116,13 +116,14 @@
           <div class="module-heading"><div><p class="eyebrow">OPERACIONES <span>·</span> CAJA</p><h2 id="turno-title">Turno de caja</h2><p class="module-copy">Registra la apertura, ventas y diferencia al cierre.</p></div></div>
           <div class="shift-layout">
             <section class="shift-summary"><p class="eyebrow">ESTADO DEL TURNO</p><h3 id="shift-state">Consultando caja…</h3><p class="module-copy" id="shift-time"></p>
-              <dl class="shift-totals"><div><dt>Monto inicial</dt><dd id="shift-opening-total">Bs 0,00</dd></div><div><dt>Total vendido</dt><dd id="shift-sales-total">Bs 0,00</dd></div><div><dt>Esperado en caja</dt><dd id="shift-expected-total">Bs 0,00</dd></div></dl>
+              <dl class="shift-totals"><div><dt>Monto inicial</dt><dd id="shift-opening-total">Bs 0,00</dd></div><div><dt>Efectivo</dt><dd id="shift-cash-total">Bs 0,00</dd></div><div><dt>QR</dt><dd id="shift-qr-total">Bs 0,00</dd></div><div><dt>Tarjeta</dt><dd id="shift-card-total">Bs 0,00</dd></div><div><dt>Total vendido</dt><dd id="shift-sales-total">Bs 0,00</dd></div><div><dt>Esperado en caja (efectivo)</dt><dd id="shift-expected-total">Bs 0,00</dd></div></dl>
             </section>
-            <section class="shift-actions"><form id="shift-open-form"><label class="form-field" for="shift-opening-amount">Monto inicial en Bs<input id="shift-opening-amount" type="number" min="0" step="0.01" value="0" required></label><button class="checkout-button" type="submit" id="shift-open-button">Abrir turno</button></form>
+            <section class="shift-actions"><form id="shift-open-form"><label class="form-field" for="shift-type">Turno<select id="shift-type" name="tipoTurno" required><option value="MANANA">Mañana</option><option value="TARDE">Tarde</option></select></label><label class="form-field" for="shift-opening-amount">Monto inicial en Bs<input id="shift-opening-amount" type="number" min="0" step="0.01" value="0" required></label><button class="checkout-button" type="submit" id="shift-open-button">Abrir turno</button></form>
               <form id="shift-close-form" hidden><label class="form-field" for="shift-closing-amount">Efectivo contado al cierre (Bs)<input id="shift-closing-amount" type="number" min="0" step="0.01" required></label><button class="checkout-button" type="submit" id="shift-close-button">Cerrar turno</button></form>
               <p class="form-error" id="shift-error" role="alert"></p><p class="module-copy" id="shift-result"></p>
             </section>
           </div>
+          <section class="analytics-block" id="admin-shift-history" hidden><div class="module-heading"><div><p class="eyebrow">ADMINISTRACIÓN · TODAS LAS SUCURSALES</p><h2>Historial de turnos</h2></div></div><div class="table-shell"><table class="data-table"><thead><tr><th>Usuario</th><th>Sucursal</th><th>Turno</th><th>Estado</th><th>Efectivo</th><th>QR</th><th>Tarjeta</th><th>Total vendido</th></tr></thead><tbody id="admin-shifts-table"></tbody></table></div></section>
         </section>
         <section class="module-page" data-module="productos" aria-labelledby="productos-title">
           <div class="module-heading"><div><p class="eyebrow">CATÁLOGO <span>·</span> ADMINISTRACIÓN</p><h2 id="productos-title">Productos</h2><p class="module-copy">Gestiona el menú que aparece en Caja.</p></div><button class="checkout-button module-action" type="button" id="new-product">+ Nuevo producto</button></div>
@@ -151,7 +152,7 @@
         <label><input type="radio" name="payment" value="QR"><span><b>QR</b><small>Transferencia</small></span></label>
         <label><input type="radio" name="payment" value="TARJETA"><span><b>Tarjeta</b><small>Débito o crédito</small></span></label>
       </div>
-      <label class="form-field cash-received" id="cash-received-field" for="cash-received">Dinero recibido (Bs)<input id="cash-received" name="recibido" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0,00"></label>
+      <label class="form-field cash-received" id="cash-received-field" for="cash-received">Dinero recibido (Bs)<input id="cash-received" name="recibido" type="text" inputmode="decimal" autocomplete="off" placeholder="Escribe el monto, por ejemplo 10,50" aria-describedby="cash-change"></label>
       <div class="change-line" id="change-line" aria-live="polite"><span>Cambio</span><strong id="cash-change">Bs 0,00</strong></div>
       <div class="dialog-total"><span>Total a cobrar</span><strong id="dialog-total">Bs 0,00</strong></div>
       <button class="checkout-button confirm-button" id="confirm-payment" value="confirm"><span>Confirmar cobro</span><span aria-hidden="true">↗</span></button>

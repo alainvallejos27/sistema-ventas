@@ -4,7 +4,8 @@ const { once } = require("node:events");
 const path = require("node:path");
 const { after, before, test } = require("node:test");
 const net = require("node:net");
-const { authenticate } = require("../middleware/auth");
+const { authenticate, USER_ROLES } = require("../middleware/auth");
+const { rolesForApiRoute } = require("../routes/apiRoutes");
 
 let serverProcess;
 let baseUrl;
@@ -67,6 +68,19 @@ test("serves the login screen with security headers and a public health check", 
     const health = await fetch(`${baseUrl}/api/health`);
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), { estado: "ok" });
+});
+
+test("applies the role matrix to protected API routes and allows public catalog reads", () => {
+    assert.deepEqual(USER_ROLES, ["ADMIN", "MENU_STAFF", "CASHIER", "BARISTA", "CUSTOMER"]);
+    assert.deepEqual(rolesForApiRoute("GET", "/productos"), ["ADMIN", "CASHIER", "MENU_STAFF", "CUSTOMER"]);
+    assert.equal(rolesForApiRoute("GET", "/health"), null);
+    assert.deepEqual(rolesForApiRoute("POST", "/pedidos"), ["ADMIN", "CASHIER", "CUSTOMER"]);
+    assert.deepEqual(rolesForApiRoute("POST", "/ventas"), ["ADMIN", "CASHIER"]);
+    assert.deepEqual(rolesForApiRoute("PATCH", "/pedidos/123/estado"), ["ADMIN", "BARISTA"]);
+    assert.deepEqual(rolesForApiRoute("GET", "/caja/turnos"), ["ADMIN"]);
+    assert.deepEqual(rolesForApiRoute("GET", "/reportes/ventas-dia"), ["ADMIN"]);
+    assert.deepEqual(rolesForApiRoute("POST", "/insumos"), ["ADMIN", "MENU_STAFF"]);
+    assert.deepEqual(rolesForApiRoute("POST", "/usuarios"), ["ADMIN"]);
 });
 
 test("does not fall back to demo data when Supabase is missing and blocks protected operations", async () => {

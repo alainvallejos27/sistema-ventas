@@ -72,6 +72,39 @@ function validarPrecio(value) {
     return price;
 }
 
+async function sucursalActivaPorDefecto(client) {
+    const branch = dataOrThrow(await client.from("sucursales")
+        .select("id")
+        .eq("activa", true)
+        .order("nombre")
+        .limit(1)
+        .maybeSingle());
+    if (!branch) throw new ApiError(400, "No hay una sucursal activa disponible.");
+    return branch.id;
+}
+
+async function sucursalPara(req, client, requestedId) {
+    const role = req.auth.profile.rol;
+    if (role === "CUSTOMER") return sucursalActivaPorDefecto(client);
+    if (role !== "ADMIN") {
+        if (!req.auth.profile.sucursal_id) throw new ApiError(403, "Tu perfil no tiene una sucursal asignada.");
+        return req.auth.profile.sucursal_id;
+    }
+
+    let query = client.from("sucursales").select("id").eq("activa", true);
+    if (requestedId !== undefined) {
+        if (typeof requestedId !== "string" || !/^[0-9a-f-]{36}$/i.test(requestedId)) {
+            throw new ApiError(400, "La sucursal seleccionada no es válida.");
+        }
+        query = query.eq("id", requestedId);
+    } else {
+        return sucursalActivaPorDefecto(client);
+    }
+    const branch = dataOrThrow(await query.maybeSingle());
+    if (!branch) throw new ApiError(400, "No hay una sucursal activa disponible.");
+    return branch.id;
+}
+
 function ordenarVariantes(variants) {
     return [...variants].sort((a, b) => (VARIANT_ORDER[a.tamano] ?? 9) - (VARIANT_ORDER[b.tamano] ?? 9));
 }
@@ -81,6 +114,7 @@ function exponerProducto(product, category, variants) {
     const firstVariant = activeVariants[0];
     return {
         id: product.id,
+        sucursalId: product.sucursal_id,
         nombre: product.nombre,
         categoria: category?.nombre || "Sin categoría",
         categoriaId: product.categoria_id,
@@ -98,12 +132,13 @@ function exponerProducto(product, category, variants) {
     };
 }
 
-async function cargarProductos(client, { id, includeInactive = false } = {}) {
+async function cargarProductos(client, { id, includeInactive = false, sucursalId } = {}) {
     let productsQuery = client
         .from("productos")
-        .select("id,categoria_id,nombre,descripcion,imagen_url,activo,creado_en");
+        .select("id,sucursal_id,categoria_id,nombre,descripcion,imagen_url,activo,creado_en");
     if (id) productsQuery = productsQuery.eq("id", id);
     else if (!includeInactive) productsQuery = productsQuery.eq("activo", true);
+    if (sucursalId) productsQuery = productsQuery.eq("sucursal_id", sucursalId);
 
     const products = dataOrThrow(await productsQuery.order("nombre"));
     if (!products.length) return [];
@@ -111,7 +146,7 @@ async function cargarProductos(client, { id, includeInactive = false } = {}) {
     const categoryIds = [...new Set(products.map((product) => product.categoria_id))];
     const productIds = products.map((product) => product.id);
     const [categories, variants] = await Promise.all([
-        client.from("categorias").select("id,nombre,descripcion").in("id", categoryIds),
+        client.from("categorias").select("id,sucursal_id,nombre,descripcion").in("id", categoryIds),
         client.from("variantes_producto").select("id,producto_id,tamano,precio,activo").in("producto_id", productIds).eq("activo", true)
     ]);
     const categoryById = new Map(dataOrThrow(categories).map((category) => [category.id, category]));
@@ -129,8 +164,9 @@ async function cargarProductos(client, { id, includeInactive = false } = {}) {
     ));
 }
 
-async function buscarCategoriaPorNombre(client, nombre) {
-    const result = await client.from("categorias").select("id,nombre").eq("nombre", nombre).maybeSingle();
+async function buscarCategoriaPorNombre(client, nombre, sucursalId) {
+    const result = await client.from("categorias").select("id,sucursal_id,nombre").eq("nombre", nombre)
+        .eq("sucursal_id", sucursalId).maybeSingle();
     return dataOrThrow(result);
 }
 
@@ -208,12 +244,19 @@ router.get("/estado", (req, res) => {
 router.get("/categorias", async (req, res) => {
     try {
         const client = databaseClient(req);
-        const categories = dataOrThrow(await client.from("categorias").select("id,nombre,descripcion").order("nombre"));
+        let query = client.from("categorias")
+            .select("id,sucursal_id,nombre,descripcion")
+            .order("nombre");
+        if (req.auth?.profile?.rol === "CUSTOMER") {
+            query = query.eq("sucursal_id", await sucursalActivaPorDefecto(client));
+        }
+        const categories = dataOrThrow(await query);
         const counts = await Promise.all(categories.map(async (category) => {
             const result = await client
                 .from("productos")
                 .select("id", { count: "exact", head: true })
                 .eq("categoria_id", category.id)
+                .eq("sucursal_id", category.sucursal_id)
                 .eq("activo", true);
             if (result.error) failDatabase(result.error);
             return { ...category, cantidadProductos: result.count || 0 };
@@ -228,10 +271,12 @@ router.post("/categorias", async (req, res) => {
     try {
         const nombre = validarTexto(req.body?.nombre, "El nombre", 60);
         const descripcion = typeof req.body?.descripcion === "string" ? req.body.descripcion.trim() : "";
-        const result = await databaseClient(req)
+        const client = databaseClient(req);
+        const sucursalId = await sucursalPara(req, client, req.body?.sucursalId);
+        const result = await client
             .from("categorias")
-            .insert({ nombre, descripcion })
-            .select("id,nombre,descripcion")
+            .insert({ sucursal_id: sucursalId, nombre, descripcion })
+            .select("id,sucursal_id,nombre,descripcion")
             .single();
         const category = dataOrThrow(result);
         return res.status(201).json({ ...category, cantidadProductos: 0 });
@@ -240,18 +285,20 @@ router.post("/categorias", async (req, res) => {
     }
 });
 
-router.put("/categorias/:nombre", async (req, res) => {
+router.put("/categorias/:id", async (req, res) => {
     try {
         const client = databaseClient(req);
-        const oldName = req.params.nombre;
-        const category = await buscarCategoriaPorNombre(client, oldName);
+        const category = dataOrThrow(await client.from("categorias")
+            .select("id")
+            .eq("id", req.params.id)
+            .maybeSingle());
         if (!category) throw new ApiError(404, "Categoría no encontrada.");
         const nombre = validarTexto(req.body?.nombre, "El nombre", 60);
         const descripcion = typeof req.body?.descripcion === "string" ? req.body.descripcion.trim() : "";
         const updated = dataOrThrow(await client.from("categorias")
             .update({ nombre, descripcion })
             .eq("id", category.id)
-            .select("id,nombre,descripcion")
+            .select("id,sucursal_id,nombre,descripcion")
             .single());
         return res.json(updated);
     } catch (error) {
@@ -259,10 +306,13 @@ router.put("/categorias/:nombre", async (req, res) => {
     }
 });
 
-router.delete("/categorias/:nombre", async (req, res) => {
+router.delete("/categorias/:id", async (req, res) => {
     try {
         const client = databaseClient(req);
-        const category = await buscarCategoriaPorNombre(client, req.params.nombre);
+        const category = dataOrThrow(await client.from("categorias")
+            .select("id")
+            .eq("id", req.params.id)
+            .maybeSingle());
         if (!category) throw new ApiError(404, "Categoría no encontrada.");
         dataOrThrow(await client.from("categorias").delete().eq("id", category.id));
         return res.status(204).send();
@@ -273,7 +323,11 @@ router.delete("/categorias/:nombre", async (req, res) => {
 
 router.get("/productos", async (req, res) => {
     try {
-        const products = await cargarProductos(databaseClient(req));
+        const client = databaseClient(req);
+        const sucursalId = req.auth?.profile?.rol === "CUSTOMER"
+            ? await sucursalActivaPorDefecto(client)
+            : undefined;
+        const products = await cargarProductos(client, { sucursalId });
         const query = typeof req.query.buscar === "string" ? req.query.buscar.trim().toLocaleLowerCase("es") : "";
         return res.json(query
             ? products.filter((product) => `${product.nombre} ${product.descripcion}`.toLocaleLowerCase("es").includes(query))
@@ -285,7 +339,11 @@ router.get("/productos", async (req, res) => {
 
 router.get("/productos/:id", async (req, res) => {
     try {
-        const products = await cargarProductos(databaseClient(req), { id: req.params.id });
+        const client = databaseClient(req);
+        const sucursalId = req.auth?.profile?.rol === "CUSTOMER"
+            ? await sucursalActivaPorDefecto(client)
+            : undefined;
+        const products = await cargarProductos(client, { id: req.params.id, sucursalId });
         if (!products.length) throw new ApiError(404, "Producto no encontrado.");
         return res.json(products[0]);
     } catch (error) {
@@ -300,10 +358,12 @@ router.post("/productos", async (req, res) => {
         const nombre = validarTexto(req.body?.nombre, "El nombre", 80);
         const categoria = validarTexto(req.body?.categoria, "La categoría", 60);
         const precio = validarPrecio(req.body?.precio);
-        const category = await buscarCategoriaPorNombre(client, categoria);
+        const sucursalId = await sucursalPara(req, client, req.body?.sucursalId);
+        const category = await buscarCategoriaPorNombre(client, categoria, sucursalId);
         if (!category) throw new ApiError(400, "La categoría seleccionada no existe.");
 
         const result = await client.from("productos").insert({
+            sucursal_id: sucursalId,
             nombre,
             categoria_id: category.id,
             descripcion: typeof req.body?.descripcion === "string" ? req.body.descripcion.trim() : "",
@@ -343,7 +403,11 @@ router.put("/productos/:id", async (req, res) => {
             patch.activo = req.body.activo;
         }
         if (req.body?.categoria !== undefined) {
-            const category = await buscarCategoriaPorNombre(client, validarTexto(req.body.categoria, "La categoría", 60));
+            const category = await buscarCategoriaPorNombre(
+                client,
+                validarTexto(req.body.categoria, "La categoría", 60),
+                current.sucursalId
+            );
             if (!category) throw new ApiError(400, "La categoría seleccionada no existe.");
             patch.categoria_id = category.id;
         }
@@ -536,10 +600,7 @@ router.get("/pedidos", async (req, res) => {
         let query = databaseClient(req).from("pedidos").select(ORDER_WITH_ITEMS).order("fecha", { ascending: false });
         
         if (req.query.estado && req.query.estado !== "TODOS") {
-            const estadoBruto = decodeURIComponent(req.query.estado).trim();
-            // Normaliza automáticamente cualquier guion bajo a espacio para Supabase
-            const estadoNormalizado = estadoBruto.replace(/_/g, " ");
-            query = query.eq("estado", estadoNormalizado);
+            query = query.eq("estado", String(req.query.estado).trim());
         }
 
         const orders = dataOrThrow(await query);
@@ -593,27 +654,35 @@ router.patch("/pedidos/:id/estado", async (req, res) => {
         return handleError(res, error);
     }
 });
+router.get("/caja/turnos", async (req, res) => {
+    try {
+        const turns = dataOrThrow(await databaseClient(req).from("caja_turnos")
+            .select("id,usuario_id,sucursal_id,tipo_turno,apertura,cierre,monto_inicial,total_vendido,total_efectivo,total_qr,total_tarjeta,monto_esperado,monto_cierre,diferencia,estado,usuarios(nombre,correo),sucursales(nombre)")
+            .order("apertura", { ascending: false })
+            .limit(100));
+        return res.json(turns);
+    } catch (error) {
+        return handleError(res, error);
+    }
+});
+
 router.get("/caja/turno", async (req, res) => {
     try {
         const client = databaseClient(req);
         const result = await client.from("caja_turnos")
-            .select("id,usuario_id,sucursal_id,apertura,monto_inicial,estado")
+            .select("id,usuario_id,sucursal_id,tipo_turno,apertura,monto_inicial,estado,total_vendido,total_efectivo,total_qr,total_tarjeta,monto_esperado")
             .eq("usuario_id", req.auth.user.id)
             .eq("estado", "ABIERTO")
             .maybeSingle();
         const turno = dataOrThrow(result);
         if (!turno) return res.json(null);
-        const payments = dataOrThrow(await client.from("pagos")
-            .select("monto,metodo")
-            .eq("caja_turno_id", turno.id)
-            .eq("estado", "CONFIRMADO"));
-        const totalVendido = payments.reduce((total, payment) => total + Number(payment.monto), 0);
-        const efectivo = payments.filter((payment) => payment.metodo === "EFECTIVO")
-            .reduce((total, payment) => total + Number(payment.monto), 0);
         return res.json({
             ...turno,
-            total_vendido: totalVendido,
-            monto_esperado: Number(turno.monto_inicial) + efectivo
+            total_vendido: Number(turno.total_vendido),
+            total_efectivo: Number(turno.total_efectivo),
+            total_qr: Number(turno.total_qr),
+            total_tarjeta: Number(turno.total_tarjeta),
+            monto_esperado: Number(turno.monto_esperado ?? (Number(turno.monto_inicial) + Number(turno.total_efectivo)))
         });
     } catch (error) {
         return handleError(res, error);
@@ -626,10 +695,17 @@ router.post("/caja/turno/abrir", async (req, res) => {
         if (!Number.isFinite(montoInicial) || montoInicial < 0 || montoInicial > 1000000) {
             throw new ApiError(400, "El monto inicial debe ser un número entre 0 y 1.000.000.");
         }
+        const tipoTurno = req.body?.tipoTurno;
+        if (!["MANANA", "TARDE"].includes(tipoTurno)) {
+            throw new ApiError(400, "Selecciona un turno de mañana o tarde.");
+        }
         const client = databaseClient(req);
-        const turnoId = dataOrThrow(await client.rpc("abrir_turno_caja", { p_monto_inicial: montoInicial }));
+        const turnoId = dataOrThrow(await client.rpc("abrir_turno_caja", {
+            p_monto_inicial: montoInicial,
+            p_tipo_turno: tipoTurno
+        }));
         const turno = dataOrThrow(await client.from("caja_turnos")
-            .select("id,usuario_id,sucursal_id,apertura,monto_inicial,estado")
+            .select("id,usuario_id,sucursal_id,tipo_turno,apertura,monto_inicial,estado")
             .eq("id", turnoId)
             .single());
         return res.status(201).json(turno);

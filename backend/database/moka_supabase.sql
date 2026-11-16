@@ -36,6 +36,10 @@ create table if not exists public.sucursales (
   creado_en  timestamptz not null default now()
 );
 
+insert into public.sucursales (id, nombre, direccion)
+values ('00000000-0000-0000-0000-000000000001', 'Moka Central', 'Av. Heroínas, Cochabamba')
+on conflict (id) do nothing;
+
 -- Perfil del usuario: el id es el MISMO de auth.users
 create table if not exists public.usuarios (
   id           uuid primary key references auth.users(id) on delete cascade,
@@ -55,6 +59,15 @@ create table if not exists public.categorias (
   descripcion text
 );
 
+alter table public.categorias add column if not exists sucursal_id uuid references public.sucursales(id) on delete cascade;
+update public.categorias
+   set sucursal_id = '00000000-0000-0000-0000-000000000001'
+ where sucursal_id is null;
+alter table public.categorias alter column sucursal_id set not null;
+alter table public.categorias drop constraint if exists categorias_nombre_key;
+alter table public.categorias drop constraint if exists uq_categorias_sucursal_nombre;
+alter table public.categorias add constraint uq_categorias_sucursal_nombre unique (sucursal_id, nombre);
+
 create table if not exists public.productos (
   id           uuid primary key default gen_random_uuid(),
   categoria_id uuid not null references public.categorias(id) on delete restrict,
@@ -65,6 +78,13 @@ create table if not exists public.productos (
   creado_en    timestamptz not null default now(),
   unique (categoria_id, nombre)
 );
+
+alter table public.productos add column if not exists sucursal_id uuid references public.sucursales(id) on delete cascade;
+update public.productos p
+   set sucursal_id = c.sucursal_id
+  from public.categorias c
+ where p.categoria_id = c.id and p.sucursal_id is null;
+alter table public.productos alter column sucursal_id set not null;
 
 create table if not exists public.variantes_producto (
   id          uuid primary key default gen_random_uuid(),
@@ -143,10 +163,14 @@ create table if not exists public.caja_turnos (
   id              uuid primary key default gen_random_uuid(),
   usuario_id      uuid not null references public.usuarios(id) on delete restrict,
   sucursal_id     uuid not null references public.sucursales(id) on delete restrict,
+  tipo_turno      text not null default 'MANANA',
   apertura        timestamptz not null default now(),
   monto_inicial   numeric(12,2) not null check (monto_inicial >= 0),
   cierre          timestamptz,
   total_vendido   numeric(12,2) not null default 0,
+  total_efectivo  numeric(12,2) not null default 0,
+  total_qr        numeric(12,2) not null default 0,
+  total_tarjeta   numeric(12,2) not null default 0,
   monto_esperado  numeric(12,2),
   monto_cierre    numeric(12,2),
   diferencia      numeric(12,2),
@@ -158,6 +182,39 @@ create table if not exists public.caja_turnos (
 );
 
 alter table public.pagos add column if not exists caja_turno_id uuid references public.caja_turnos(id) on delete set null;
+
+alter table public.caja_turnos add column if not exists tipo_turno text;
+update public.caja_turnos
+   set tipo_turno = case
+     when (apertura at time zone 'America/La_Paz')::time < time '12:00' then 'MANANA'
+     else 'TARDE'
+   end
+ where tipo_turno is null;
+alter table public.caja_turnos alter column tipo_turno set default 'MANANA';
+alter table public.caja_turnos alter column tipo_turno set not null;
+alter table public.caja_turnos add column if not exists total_efectivo numeric(12,2) not null default 0;
+alter table public.caja_turnos add column if not exists total_qr numeric(12,2) not null default 0;
+alter table public.caja_turnos add column if not exists total_tarjeta numeric(12,2) not null default 0;
+update public.caja_turnos ct
+   set total_vendido = coalesce(p.total_vendido, 0),
+       total_efectivo = coalesce(p.total_efectivo, 0),
+       total_qr = coalesce(p.total_qr, 0),
+       total_tarjeta = coalesce(p.total_tarjeta, 0),
+       monto_esperado = ct.monto_inicial + coalesce(p.total_efectivo, 0)
+  from (
+    select caja_turno_id,
+           sum(monto) as total_vendido,
+           sum(monto) filter (where metodo = 'EFECTIVO') as total_efectivo,
+           sum(monto) filter (where metodo = 'QR') as total_qr,
+           sum(monto) filter (where metodo = 'TARJETA') as total_tarjeta
+      from public.pagos
+     where estado = 'CONFIRMADO' and caja_turno_id is not null
+     group by caja_turno_id
+  ) p
+ where ct.id = p.caja_turno_id;
+alter table public.caja_turnos drop constraint if exists ck_caja_turno_tipo;
+alter table public.caja_turnos add constraint ck_caja_turno_tipo
+  check (tipo_turno in ('MANANA','TARDE'));
 
 -- ---------------------------------------------------------------------
 -- 3. ÍNDICES
@@ -345,12 +402,17 @@ begin
   if v_total is null then raise exception 'El pedido no existe o ya no está pendiente de pago'; end if;
   if v_total <= 0   then raise exception 'El pedido no tiene productos'; end if;
 
-  if coalesce(auth.role(), '') <> 'service_role' then
+  if public.app_rol() = 'CASHIER' then
     select id into v_turno from public.caja_turnos
      where usuario_id = auth.uid() and estado = 'ABIERTO'
        and sucursal_id = (select sucursal_id from public.pedidos where id = p_pedido)
      for update;
     if v_turno is null then raise exception 'Debes abrir un turno de caja antes de cobrar'; end if;
+  elsif public.app_rol() = 'ADMIN' then
+    select id into v_turno from public.caja_turnos
+     where usuario_id = auth.uid() and estado = 'ABIERTO'
+       and sucursal_id = (select sucursal_id from public.pedidos where id = p_pedido)
+     for update;
   end if;
 
   perform public.consumir_insumos_pedido(p_pedido);
@@ -359,7 +421,18 @@ begin
   values (p_pedido, p_metodo, v_total, 'CONFIRMADO', v_turno)
   returning id into v_pago;
 
-  update public.pedidos set estado = 'EN_PREPARACION' where id = p_pedido;
+  if v_turno is not null then
+    update public.caja_turnos
+       set total_vendido = total_vendido + v_total,
+           total_efectivo = total_efectivo + case when p_metodo = 'EFECTIVO' then v_total else 0 end,
+           total_qr = total_qr + case when p_metodo = 'QR' then v_total else 0 end,
+           total_tarjeta = total_tarjeta + case when p_metodo = 'TARJETA' then v_total else 0 end,
+           monto_esperado = monto_inicial + total_efectivo
+             + case when p_metodo = 'EFECTIVO' then v_total else 0 end
+     where id = v_turno;
+  end if;
+
+  update public.pedidos set estado = 'PAGADO' where id = p_pedido;
   return v_pago;
 end $$;
 
@@ -374,7 +447,7 @@ declare
   v_variante uuid;
   v_cantidad integer;
 begin
-  if not coalesce(public.app_rol() in ('ADMIN','CASHIER'), false) then
+  if not coalesce(public.app_rol() in ('ADMIN','CASHIER','CUSTOMER'), false) then
     raise exception 'No autorizado para crear pedidos';
   end if;
   if p_tipo not in ('PARA_LLEVAR','EN_MESA') then
@@ -388,10 +461,13 @@ begin
   end if;
 
   v_sucursal := public.app_sucursal();
-  if v_sucursal is null and public.app_rol() = 'ADMIN' then
+  if public.app_rol() = 'CUSTOMER'
+     or (v_sucursal is null and public.app_rol() = 'ADMIN') then
     select id into v_sucursal from public.sucursales where activa order by nombre limit 1;
   end if;
-  if v_sucursal is null then raise exception 'El perfil no tiene sucursal asignada'; end if;
+  if v_sucursal is null or not exists (
+    select 1 from public.sucursales where id = v_sucursal and activa
+  ) then raise exception 'No hay una sucursal activa asignada'; end if;
 
   insert into public.pedidos (sucursal_id, usuario_id, tipo, estado)
   values (v_sucursal, auth.uid(), p_tipo, 'PENDIENTE')
@@ -411,6 +487,7 @@ begin
       select 1 from public.variantes_producto v
       join public.productos p on p.id = v.producto_id
       where v.id = v_variante and v.activo and p.activo
+        and p.sucursal_id = v_sucursal
     ) then
       raise exception 'Una variante no existe o no está activa';
     end if;
@@ -422,7 +499,8 @@ begin
   return v_pedido;
 end $$;
 
-create or replace function public.abrir_turno_caja(p_monto_inicial numeric)
+drop function if exists public.abrir_turno_caja(numeric);
+create or replace function public.abrir_turno_caja(p_monto_inicial numeric, p_tipo_turno text)
 returns uuid
 language plpgsql security definer set search_path = public as $$
 declare v_sucursal uuid; v_turno uuid;
@@ -433,6 +511,9 @@ begin
   if p_monto_inicial is null or p_monto_inicial < 0 then
     raise exception 'El monto inicial debe ser mayor o igual a cero';
   end if;
+  if p_tipo_turno is null or p_tipo_turno not in ('MANANA','TARDE') then
+    raise exception 'El turno debe ser MANANA o TARDE';
+  end if;
 
   v_sucursal := public.app_sucursal();
   if v_sucursal is null and public.app_rol() = 'ADMIN' then
@@ -440,8 +521,8 @@ begin
   end if;
   if v_sucursal is null then raise exception 'El perfil no tiene sucursal asignada'; end if;
 
-  insert into public.caja_turnos (usuario_id, sucursal_id, monto_inicial)
-  values (auth.uid(), v_sucursal, p_monto_inicial)
+  insert into public.caja_turnos (usuario_id, sucursal_id, monto_inicial, tipo_turno)
+  values (auth.uid(), v_sucursal, p_monto_inicial, p_tipo_turno)
   returning id into v_turno;
   return v_turno;
 end $$;
@@ -449,7 +530,13 @@ end $$;
 create or replace function public.cerrar_turno_caja(p_turno uuid, p_monto_cierre numeric)
 returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare v_turno public.caja_turnos%rowtype; v_vendido numeric(12,2); v_efectivo numeric(12,2); v_esperado numeric(12,2);
+declare
+  v_turno public.caja_turnos%rowtype;
+  v_vendido numeric(12,2);
+  v_efectivo numeric(12,2);
+  v_qr numeric(12,2);
+  v_tarjeta numeric(12,2);
+  v_esperado numeric(12,2);
 begin
   if not coalesce(public.app_rol() in ('ADMIN','CASHIER'), false) then
     raise exception 'No autorizado para cerrar caja';
@@ -465,22 +552,27 @@ begin
     raise exception 'No autorizado para cerrar este turno';
   end if;
 
-  select coalesce(sum(pg.monto), 0) into v_vendido
+  select
+    coalesce(sum(pg.monto), 0),
+    coalesce(sum(pg.monto) filter (where pg.metodo = 'EFECTIVO'), 0),
+    coalesce(sum(pg.monto) filter (where pg.metodo = 'QR'), 0),
+    coalesce(sum(pg.monto) filter (where pg.metodo = 'TARJETA'), 0)
+    into v_vendido, v_efectivo, v_qr, v_tarjeta
     from public.pagos pg
    where pg.caja_turno_id = v_turno.id and pg.estado = 'CONFIRMADO';
-  select coalesce(sum(pg.monto), 0) into v_efectivo
-    from public.pagos pg
-   where pg.caja_turno_id = v_turno.id and pg.estado = 'CONFIRMADO' and pg.metodo = 'EFECTIVO';
   v_esperado := v_turno.monto_inicial + v_efectivo;
 
   update public.caja_turnos set
-    cierre = now(), total_vendido = v_vendido, monto_esperado = v_esperado,
+    cierre = now(), total_vendido = v_vendido,
+    total_efectivo = v_efectivo, total_qr = v_qr, total_tarjeta = v_tarjeta,
+    monto_esperado = v_esperado,
     monto_cierre = p_monto_cierre, diferencia = p_monto_cierre - v_esperado,
     estado = 'CERRADO'
   where id = p_turno;
 
   return jsonb_build_object(
-    'id', p_turno, 'totalVendido', v_vendido, 'montoEsperado', v_esperado,
+    'id', p_turno, 'totalVendido', v_vendido, 'totalEfectivo', v_efectivo,
+    'totalQr', v_qr, 'totalTarjeta', v_tarjeta, 'montoEsperado', v_esperado,
     'montoCierre', p_monto_cierre, 'diferencia', p_monto_cierre - v_esperado,
     'estado', 'CERRADO'
   );
@@ -519,18 +611,25 @@ begin
   if not (
        coalesce(auth.role() = 'service_role', false)
     or coalesce(public.app_rol() = 'ADMIN', false)
-    or (coalesce(public.app_rol() in ('CASHIER','BARISTA'), false) and public.app_sucursal() = v_suc)
+    or (coalesce(public.app_rol() = 'BARISTA', false) and public.app_sucursal() = v_suc)
   ) then
     raise exception 'No autorizado para cambiar el estado de este pedido';
   end if;
 
   if not (
-       (v_actual = 'PAGADO'         and p_nuevo = 'EN_PREPARACION')
+       (v_actual = 'PAGADO' and p_nuevo = 'EN_PREPARACION')
     or (v_actual = 'EN_PREPARACION' and p_nuevo = 'LISTO')
-    or (v_actual = 'LISTO'          and p_nuevo = 'ENTREGADO')
+    or (v_actual = 'LISTO' and p_nuevo = 'ENTREGADO')
     or (v_actual in ('PENDIENTE','PAGADO') and p_nuevo = 'CANCELADO')
   ) then
     raise exception 'Transición no permitida: % -> %', v_actual, p_nuevo;
+  end if;
+
+  if public.app_rol() = 'BARISTA' and not (
+       (v_actual = 'PAGADO' and p_nuevo = 'EN_PREPARACION')
+    or (v_actual = 'EN_PREPARACION' and p_nuevo = 'LISTO')
+  ) then
+    raise exception 'La barra solo puede avanzar pedidos pagados a preparación y listos';
   end if;
 
   update public.pedidos set estado = p_nuevo where id = p_pedido;
@@ -565,28 +664,27 @@ end $$;
 grant usage on schema public to anon, authenticated;
 grant usage on type public.rol_usuario, public.tipo_pedido, public.estado_pedido, public.metodo_pago to authenticated;
 grant usage on type public.tamano_producto to anon, authenticated;
-grant select on public.sucursales to authenticated;
-grant select on public.usuarios to authenticated;
+grant select, insert, update, delete on public.sucursales, public.usuarios to authenticated;
 grant select on public.categorias, public.productos, public.variantes_producto to anon, authenticated;
 grant select, insert, update, delete on public.categorias, public.productos, public.variantes_producto, public.insumos to authenticated;
 grant select, insert, update, delete on public.recetas to authenticated;
 grant select on public.pedidos, public.detalle_pedido, public.pagos to authenticated;
 grant select on public.caja_turnos to authenticated;
-grant insert on public.pedidos, public.detalle_pedido to authenticated;
+revoke insert on public.pedidos, public.detalle_pedido from authenticated;
 revoke all on function public.crear_pedido(jsonb, public.tipo_pedido) from public, anon;
 revoke all on function public.crear_pedido_y_cobrar(jsonb, public.metodo_pago, public.tipo_pedido) from public, anon;
 revoke all on function public.registrar_pago(uuid, public.metodo_pago) from public, anon;
 revoke all on function public.cambiar_estado_pedido(uuid, public.estado_pedido) from public, anon;
 revoke all on function public.registrar_compra_insumo(uuid, numeric) from public, anon;
 revoke all on function public.consumir_insumos_pedido(uuid) from public, anon, authenticated;
-revoke all on function public.abrir_turno_caja(numeric) from public, anon;
+revoke all on function public.abrir_turno_caja(numeric, text) from public, anon;
 revoke all on function public.cerrar_turno_caja(uuid, numeric) from public, anon;
 grant execute on function public.crear_pedido(jsonb, public.tipo_pedido) to authenticated;
 grant execute on function public.crear_pedido_y_cobrar(jsonb, public.metodo_pago, public.tipo_pedido) to authenticated;
 grant execute on function public.registrar_pago(uuid, public.metodo_pago) to authenticated;
 grant execute on function public.cambiar_estado_pedido(uuid, public.estado_pedido) to authenticated;
 grant execute on function public.registrar_compra_insumo(uuid, numeric) to authenticated;
-grant execute on function public.abrir_turno_caja(numeric) to authenticated;
+grant execute on function public.abrir_turno_caja(numeric, text) to authenticated;
 grant execute on function public.cerrar_turno_caja(uuid, numeric) to authenticated;
 
 -- ---------------------------------------------------------------------
@@ -638,39 +736,58 @@ drop policy if exists p_suc_admin on public.sucursales;
 create policy p_suc_admin on public.sucursales for all to authenticated
   using (public.app_rol() = 'ADMIN') with check (public.app_rol() = 'ADMIN');
 
--- Usuarios: cada uno ve y edita su perfil; el personal ve a su sucursal; ADMIN todo
+-- Usuarios: cada persona ve su perfil; solo ADMIN puede administrar perfiles
 drop policy if exists p_usr_select on public.usuarios;
 create policy p_usr_select on public.usuarios for select to authenticated
-  using (id = auth.uid()
-         or public.app_rol() = 'ADMIN'
-         or (public.app_rol() in ('MENU_STAFF','CASHIER','BARISTA') and sucursal_id = public.app_sucursal()));
+  using (id = auth.uid() or public.app_rol() = 'ADMIN');
 drop policy if exists p_usr_update_self on public.usuarios;
-create policy p_usr_update_self on public.usuarios for update to authenticated
-  using (id = auth.uid()) with check (id = auth.uid());
 drop policy if exists p_usr_admin on public.usuarios;
 create policy p_usr_admin on public.usuarios for all to authenticated
   using (public.app_rol() = 'ADMIN') with check (public.app_rol() = 'ADMIN');
 
--- Menú: lectura pública; escritura ADMIN y MENU_STAFF
+-- Menú público; la gestión de catálogo se limita a la sucursal del MENU_STAFF
 drop policy if exists p_cat_select on public.categorias;
-create policy p_cat_select on public.categorias for select using (true);
+create policy p_cat_select on public.categorias for select
+  using (coalesce(auth.role(), '') = 'anon'
+         or public.app_rol() in ('ADMIN','CUSTOMER')
+         or sucursal_id = public.app_sucursal());
 drop policy if exists p_cat_write on public.categorias;
 create policy p_cat_write on public.categorias for all to authenticated
-  using (public.app_rol() in ('ADMIN','MENU_STAFF')) with check (public.app_rol() in ('ADMIN','MENU_STAFF'));
+  using (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and sucursal_id = public.app_sucursal()))
+  with check (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and sucursal_id = public.app_sucursal()));
 
 drop policy if exists p_prod_select on public.productos;
 create policy p_prod_select on public.productos for select
-  using (activo or public.app_rol() in ('ADMIN','MENU_STAFF'));
+  using (public.app_rol() = 'ADMIN'
+         or (public.app_rol() = 'MENU_STAFF' and sucursal_id = public.app_sucursal())
+         or (activo and (coalesce(auth.role(), '') = 'anon'
+                         or public.app_rol() = 'CUSTOMER'
+                         or (public.app_rol() = 'CASHIER' and sucursal_id = public.app_sucursal()))));
 drop policy if exists p_prod_write on public.productos;
 create policy p_prod_write on public.productos for all to authenticated
-  using (public.app_rol() in ('ADMIN','MENU_STAFF')) with check (public.app_rol() in ('ADMIN','MENU_STAFF'));
+  using (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and sucursal_id = public.app_sucursal()))
+  with check (exists (select 1 from public.categorias c
+    where c.id = productos.categoria_id and c.sucursal_id = productos.sucursal_id)
+    and (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and sucursal_id = public.app_sucursal())));
 
 drop policy if exists p_var_select on public.variantes_producto;
 create policy p_var_select on public.variantes_producto for select
-  using (activo or public.app_rol() in ('ADMIN','MENU_STAFF'));
+  using (exists (select 1 from public.productos p
+    where p.id = producto_id
+      and (public.app_rol() = 'ADMIN'
+           or (public.app_rol() = 'MENU_STAFF' and p.sucursal_id = public.app_sucursal())
+           or (p.activo and (coalesce(auth.role(), '') = 'anon'
+                             or public.app_rol() = 'CUSTOMER'
+                             or (public.app_rol() = 'CASHIER' and p.sucursal_id = public.app_sucursal()))))
+      and (activo or public.app_rol() in ('ADMIN','MENU_STAFF'))));
 drop policy if exists p_var_write on public.variantes_producto;
 create policy p_var_write on public.variantes_producto for all to authenticated
-  using (public.app_rol() in ('ADMIN','MENU_STAFF')) with check (public.app_rol() in ('ADMIN','MENU_STAFF'));
+  using (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and exists (
+    select 1 from public.productos p where p.id = producto_id and p.sucursal_id = public.app_sucursal()
+  )))
+  with check (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and exists (
+    select 1 from public.productos p where p.id = producto_id and p.sucursal_id = public.app_sucursal()
+  )));
 
 -- Insumos: ADMIN y MENU_STAFF de su sucursal
 drop policy if exists p_ins_all on public.insumos;
@@ -682,16 +799,31 @@ drop policy if exists p_recetas_read on public.recetas;
 create policy p_recetas_read on public.recetas for select to authenticated
   using (public.app_rol() = 'ADMIN' or exists (
     select 1 from public.insumos i
-     where i.id = insumo_id and i.sucursal_id = public.app_sucursal()
+      join public.variantes_producto v on v.id = recetas.variante_id
+      join public.productos p on p.id = v.producto_id
+     where i.id = recetas.insumo_id
+       and i.sucursal_id = public.app_sucursal()
+       and p.sucursal_id = public.app_sucursal()
   ));
 drop policy if exists p_recetas_write on public.recetas;
 create policy p_recetas_write on public.recetas for all to authenticated
   using (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and exists (
-    select 1 from public.insumos i where i.id = insumo_id and i.sucursal_id = public.app_sucursal()
+    select 1 from public.insumos i
+      join public.variantes_producto v on v.id = recetas.variante_id
+      join public.productos p on p.id = v.producto_id
+     where i.id = recetas.insumo_id
+       and i.sucursal_id = public.app_sucursal()
+       and p.sucursal_id = public.app_sucursal()
   )))
-  with check (public.app_rol() = 'ADMIN' or (public.app_rol() = 'MENU_STAFF' and exists (
-    select 1 from public.insumos i where i.id = insumo_id and i.sucursal_id = public.app_sucursal()
-  )));
+  with check (exists (
+    select 1 from public.insumos i
+      join public.variantes_producto v on v.id = recetas.variante_id
+      join public.productos p on p.id = v.producto_id
+     where i.id = recetas.insumo_id
+       and i.sucursal_id = p.sucursal_id
+       and (public.app_rol() = 'ADMIN'
+            or (public.app_rol() = 'MENU_STAFF' and i.sucursal_id = public.app_sucursal()))
+  ));
 
 drop policy if exists p_caja_turnos_select on public.caja_turnos;
 create policy p_caja_turnos_select on public.caja_turnos for select to authenticated
@@ -701,7 +833,7 @@ create policy p_caja_turnos_select on public.caja_turnos for select to authentic
 drop policy if exists p_ped_select on public.pedidos;
 create policy p_ped_select on public.pedidos for select to authenticated
   using (public.app_rol() = 'ADMIN'
-         or (public.app_rol() in ('CASHIER','BARISTA','MENU_STAFF') and sucursal_id = public.app_sucursal())
+         or (public.app_rol() in ('CASHIER','BARISTA') and sucursal_id = public.app_sucursal())
          or usuario_id = auth.uid());
 
 drop policy if exists p_ped_insert on public.pedidos;
@@ -779,14 +911,14 @@ insert into public.sucursales (id, nombre, direccion)
 values ('00000000-0000-0000-0000-000000000001', 'Moka Central', 'Av. Heroínas, Cochabamba')
 on conflict (id) do nothing;
 
-insert into public.categorias (nombre, descripcion) values
-  ('Cafés',      'Bebidas calientes y frías a base de café'),
-  ('Postres',    'Repostería y dulces'),
-  ('Sándwiches', 'Opciones saladas')
-on conflict (nombre) do nothing;
+insert into public.categorias (sucursal_id, nombre, descripcion) values
+  ('00000000-0000-0000-0000-000000000001', 'Cafés',      'Bebidas calientes y frías a base de café'),
+  ('00000000-0000-0000-0000-000000000001', 'Postres',    'Repostería y dulces'),
+  ('00000000-0000-0000-0000-000000000001', 'Sándwiches', 'Opciones saladas')
+on conflict (sucursal_id, nombre) do nothing;
 
-insert into public.productos (categoria_id, nombre, descripcion)
-select c.id, x.nombre, x.descripcion
+insert into public.productos (sucursal_id, categoria_id, nombre, descripcion)
+select c.sucursal_id, c.id, x.nombre, x.descripcion
   from (values
     ('Cafés',   'Espresso',  'Café corto e intenso'),
     ('Cafés',   'Capuchino', 'Espresso con leche vaporizada y espuma'),
@@ -794,6 +926,7 @@ select c.id, x.nombre, x.descripcion
     ('Postres', 'Brownie',   'Brownie de chocolate')
   ) as x(categoria, nombre, descripcion)
   join public.categorias c on c.nombre = x.categoria
+                            and c.sucursal_id = '00000000-0000-0000-0000-000000000001'
 on conflict (categoria_id, nombre) do nothing;
 
 insert into public.variantes_producto (producto_id, tamano, precio)
@@ -805,6 +938,7 @@ select p.id, x.tamano::public.tamano_producto, x.precio
     ('Brownie','UNICO',12)
   ) as x(producto, tamano, precio)
   join public.productos p on p.nombre = x.producto
+                            and p.sucursal_id = '00000000-0000-0000-0000-000000000001'
 on conflict (producto_id, tamano) do nothing;
 
 insert into public.insumos (sucursal_id, nombre, unidad, stock, stock_minimo) values
@@ -852,6 +986,7 @@ select v.id, i.id, x.cantidad, x.opcion_leche
     ('Brownie', 'UNICO', 'Chocolate', 0.100::numeric, 'TODAS')
   ) as x(producto, tamano, insumo, cantidad, opcion_leche)
   join public.productos p on p.nombre = x.producto
+                            and p.sucursal_id = '00000000-0000-0000-0000-000000000001'
   join public.variantes_producto v on v.producto_id = p.id and v.tamano = x.tamano::public.tamano_producto
   join public.insumos i on i.nombre = x.insumo and i.sucursal_id = '00000000-0000-0000-0000-000000000001'
 on conflict (variante_id, insumo_id, opcion_leche, opcion_agregado) do nothing;
@@ -860,6 +995,8 @@ insert into public.recetas (variante_id, insumo_id, cantidad, opcion_leche, opci
 select v.id, i.id, x.cantidad, 'TODAS', x.opcion_agregado
   from public.productos p
   join public.categorias c on c.id = p.categoria_id and c.nombre = 'Cafés'
+                            and c.sucursal_id = '00000000-0000-0000-0000-000000000001'
+ where p.sucursal_id = '00000000-0000-0000-0000-000000000001'
   join public.variantes_producto v on v.producto_id = p.id
   cross join (values
     ('VAINILLA', 'Jarabe de vainilla', 0.010::numeric),
