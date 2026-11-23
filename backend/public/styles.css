@@ -194,6 +194,12 @@ h2 { margin: 0; font: 500 23px/1.2 var(--serif); letter-spacing: 0; }
 .data-table td small { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; }
 .table-button { padding: 7px 10px; border: 1px solid #d9e2d5; border-radius: 4px; background: #f3f6ef; color: var(--green-dark); font-size: 10px; font-weight: 700; }
 .table-button:hover { background: #e3eee0; }
+.table-button.delivery-complete, .table-button.delivery-complete:disabled { border-color: #c9dbe5; background: #e4edf3; color: #456a80; cursor: default; }
+.order-item { display: flex; align-items: center; gap: 7px; margin-top: 5px; }
+.order-item img, .order-item-placeholder { width: 28px; height: 28px; flex: 0 0 28px; border-radius: 4px; object-fit: cover; background: #edf1e9; }
+.order-item-placeholder { display: inline-block; }
+.order-item > span:last-child { min-width: 0; }
+.order-item small { display: block; }
 .table-empty { padding: 32px !important; color: var(--muted); text-align: center !important; }
 .status-badge { display: inline-block; padding: 5px 8px; border-radius: 12px; color: #536154; background: #edf1e9; font-size: 9px; font-weight: 700; text-transform: capitalize; }
 .status-pagado { background: #e6f0e6; color: #3c704d; }

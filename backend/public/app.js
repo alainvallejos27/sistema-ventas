@@ -9,6 +9,7 @@ let currentUser = null;
 let productBeingCustomized = null;
 let activeShift = null;
 let orderPolling = null;
+let orderImageProducts = null;
 
 const categoryFilters = document.querySelector("#category-filters");
 const productGrid = document.querySelector("#product-grid");
@@ -85,6 +86,7 @@ async function loadProducts() {
     try {
         const response = await requestJson("/api/productos");
         products = response.map(mapProduct);
+        orderImageProducts = products;
         document.querySelector("#connection-badge").innerHTML = "<span></span> API CONECTADA";
         renderFilters();
         renderProducts();
@@ -585,29 +587,44 @@ async function loadOrders(status = "TODOS") {
         const selectedStatus = kitchenMode ? "TODOS" : status;
         const query = selectedStatus === "TODOS" ? "" : `?estado=${encodeURIComponent(selectedStatus)}`;
         document.querySelector("#orders-description").textContent = kitchenMode
-            ? "Pedidos en preparación. La lista se actualiza automáticamente."
+            ? "Pedidos en preparación o listos para entregar. La lista se actualiza automáticamente."
             : "Controla el flujo de cada pedido hasta la entrega.";
         document.querySelector("#order-filters").hidden = kitchenMode;
         const responseOrders = await requestJson(`/api/pedidos${query}`);
+        if (orderImageProducts === null) {
+            try {
+                orderImageProducts = products.length ? products : (await requestJson("/api/productos")).map(mapProduct);
+            } catch (error) {
+                orderImageProducts = [];
+                showToast(`No se pudieron cargar las imágenes de productos: ${error.message}`);
+            }
+        }
         const orders = kitchenMode
-            ? responseOrders.filter((order) => ["PAGADO", "EN_PREPARACION"].includes(order.estado))
+            ? responseOrders.filter((order) => ["PAGADO", "EN_PREPARACION", "LISTO"].includes(order.estado))
             : responseOrders;
         document.querySelector("#orders-table").innerHTML = orders.length ? orders.map((order) => {
             const next = currentUser?.rol === "BARISTA"
-                ? { PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO" }[order.estado]
+                ? { PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO", LISTO: "ENTREGADO" }[order.estado]
                 : currentUser?.rol === "ADMIN"
                     ? { PAGADO: "EN_PREPARACION", EN_PREPARACION: "LISTO", LISTO: "ENTREGADO" }[order.estado]
                     : null;
-            const action = order.estado === "PENDIENTE" && ["ADMIN", "CASHIER"].includes(currentUser?.rol)
+            const action = order.estado === "ENTREGADO"
+                ? `<button class="table-button delivery-complete" type="button" disabled>Entregado</button>`
+                : order.estado === "PENDIENTE" && ["ADMIN", "CASHIER"].includes(currentUser?.rol)
                 ? `<button class="table-button" data-pay="${escapeHtml(order.id)}">Cobrar en efectivo</button>`
                 : next
-                    ? `<button class="table-button" data-advance="${escapeHtml(order.id)}" data-next="${next}">Avanzar</button>`
+                    ? `<button class="table-button" data-advance="${escapeHtml(order.id)}" data-next="${next}">${next === "ENTREGADO" ? "Entregar" : "Avanzar"}</button>`
                     : "-";
             const contents = (order.items || []).map((item) => {
                 const options = item.opciones || {};
                 const extras = [options.leche, ...(options.agregados || [])].filter(Boolean).join(", ");
-                return `${item.cantidad} × ${escapeHtml(item.nombre || "Producto")}${item.tamano && item.tamano !== "UNICO" ? ` · ${escapeHtml(item.tamano)}` : ""}${extras ? `<br><small>${escapeHtml(extras)}</small>` : ""}`;
-            }).join("<br>");
+                const relatedProduct = orderImageProducts.find((product) => (
+                    product.variants.some((variant) => String(variant.id) === String(item.varianteId))
+                    || String(product.id) === String(item.productoId || item.productId)
+                ));
+                const image = safeImageUrl(item.imagen || item.imagen_url || relatedProduct?.image || "");
+                return `<span class="order-item">${image ? `<img src="${escapeHtml(image)}" alt="" loading="lazy">` : `<span class="order-item-placeholder" aria-hidden="true">☕</span>`}<span>${item.cantidad} × ${escapeHtml(item.nombre || "Producto")}${item.tamano && item.tamano !== "UNICO" ? ` · ${escapeHtml(item.tamano)}` : ""}${extras ? `<small>${escapeHtml(extras)}</small>` : ""}</span></span>`;
+            }).join("");
             return `<tr><td data-label="Pedido"><strong>#${escapeHtml(order.id.slice(-6).toUpperCase())}</strong><small>${contents || "Sin detalle"}</small></td><td data-label="Fecha">${new Date(order.fecha).toLocaleString("es-BO")}</td><td data-label="Total">${formatMoney(Number(order.total))}</td><td data-label="Estado"><span class="status-badge status-${escapeHtml(order.estado.toLowerCase())}">${escapeHtml(order.estado.replaceAll("_", " "))}</span></td><td data-label="Acción">${action}</td></tr>`;
         }).join("") : `<tr><td colspan="5" class="table-empty">Aún no hay pedidos registrados.</td></tr>`;
     } catch (error) {
@@ -760,6 +777,16 @@ document.querySelector("#orders-table").addEventListener("click", async (event) 
 document.querySelector("#admin-product-search").addEventListener("input", loadAdminProducts);
 const productDialog = document.querySelector("#product-dialog");
 const productForm = document.querySelector("#product-form");
+document.addEventListener("click", (event) => {
+    const cancelButton = event.target.closest("[data-dialog-cancel]");
+    if (!cancelButton) return;
+    const dialog = cancelButton.closest("dialog");
+    const form = cancelButton.closest("form");
+    form?.reset();
+    dialog?.querySelectorAll('[role="alert"], .form-error').forEach((message) => { message.textContent = ""; });
+    if (dialog === customizeDialog) productBeingCustomized = null;
+    dialog?.close();
+});
 document.querySelector("#new-product").addEventListener("click", () => { productForm.reset(); document.querySelector("#product-error").textContent = ""; productDialog.showModal(); document.querySelector("#product-name").focus(); });
 productForm.addEventListener("submit", async (event) => {
     if (event.submitter?.value !== "confirm") return;
@@ -768,10 +795,15 @@ productForm.addEventListener("submit", async (event) => {
     const nombre = String(formData.get("nombre") || "").trim();
     const categoria = String(formData.get("categoria") || "").trim();
     const descripcion = String(formData.get("descripcion") || "").trim();
+    const imagen = String(formData.get("imagen") || "").trim();
     const precio = Number(formData.get("precio"));
     const error = document.querySelector("#product-error");
     if (nombre.length < 2 || !categoria || !Number.isFinite(precio) || precio < 0) {
         error.textContent = "Completa los campos obligatorios con valores válidos.";
+        return;
+    }
+    if (imagen && !safeImageUrl(imagen)) {
+        error.textContent = "Escribe una URL de imagen válida.";
         return;
     }
     const button = document.querySelector("#save-product");
@@ -780,7 +812,7 @@ productForm.addEventListener("submit", async (event) => {
         await requestJson("/api/productos", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ nombre, categoria, precio, descripcion })
+            body: JSON.stringify({ nombre, categoria, precio, descripcion, imagen })
         });
         await loadAdminProducts();
         await loadProducts();
@@ -798,8 +830,77 @@ const categoryForm = document.querySelector("#category-form");
 document.querySelector("#new-category").addEventListener("click", () => { categoryForm.reset(); document.querySelector("#category-error").textContent = ""; categoryDialog.showModal(); document.querySelector("#category-name").focus(); });
 categoryForm.addEventListener("submit", async (event) => { if (event.submitter?.value !== "confirm") return; event.preventDefault(); const formData = new FormData(categoryForm); const nombre = String(formData.get("nombre") || "").trim(); const descripcion = String(formData.get("descripcion") || "").trim(); const error = document.querySelector("#category-error"); if (nombre.length < 2) { error.textContent = "El nombre debe tener al menos 2 caracteres."; return; } const button = document.querySelector("#save-category"); button.disabled = true; try { await requestJson("/api/categorias", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, descripcion }) }); await loadCategories(); categoryDialog.close(); showToast("Categoría creada correctamente."); } catch (requestError) { error.textContent = requestError.message; } finally { button.disabled = false; } });
 document.querySelector("#categories-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-delete-category]"); if (!button || !confirm("¿Eliminar esta categoría?")) return; try { await requestJson(`/api/categorias/${encodeURIComponent(button.dataset.deleteCategory)}`, { method: "DELETE" }); await loadCategories(); showToast("Categoría eliminada."); } catch (error) { showToast(error.message); } });
-document.querySelector("#new-supply").addEventListener("click", async () => { const nombre = prompt("Nombre del insumo:"); if (!nombre) return; const unidad = prompt("Unidad:", "kg"); const stock = Number(prompt("Stock actual:", "0")); const stockMinimo = Number(prompt("Stock mínimo:", "0")); if (!unidad || !Number.isFinite(stock) || !Number.isFinite(stockMinimo) || stock < 0 || stockMinimo < 0) return showToast("Completa valores de inventario válidos."); try { await requestJson("/api/insumos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ nombre, unidad, stock, stockMinimo }) }); await loadInventory(); showToast("Insumo creado correctamente."); } catch (error) { showToast(error.message); } });
-document.querySelector("#inventory-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-buy-supply]"); if (!button) return; const cantidad = Number(prompt("Cantidad comprada:", "1")); if (!Number.isFinite(cantidad) || cantidad <= 0) return showToast("La cantidad debe ser mayor a 0."); try { await requestJson(`/api/insumos/${button.dataset.buySupply}/compra`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cantidad }) }); await loadInventory(); showToast("Compra registrada correctamente."); } catch (error) { showToast(error.message); } });
+const supplyDialog = document.querySelector("#supply-dialog");
+const supplyForm = document.querySelector("#supply-form");
+document.querySelector("#new-supply").addEventListener("click", () => { supplyForm.reset(); document.querySelector("#supply-error").textContent = ""; supplyDialog.showModal(); document.querySelector("#supply-name").focus(); });
+supplyForm.addEventListener("submit", async (event) => {
+    if (event.submitter?.value !== "confirm") return;
+    event.preventDefault();
+    const formData = new FormData(supplyForm);
+    const nombre = String(formData.get("nombre") || "").trim();
+    const unidad = String(formData.get("unidad") || "").trim();
+    const stock = Number(formData.get("stock"));
+    const stockMinimo = Number(formData.get("stockMinimo"));
+    const error = document.querySelector("#supply-error");
+    if (nombre.length < 2 || !unidad || !Number.isFinite(stock) || !Number.isFinite(stockMinimo) || stock < 0 || stockMinimo < 0) {
+        error.textContent = "Completa valores de inventario válidos.";
+        return;
+    }
+    const button = document.querySelector("#save-supply");
+    button.disabled = true;
+    try {
+        await requestJson("/api/insumos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ nombre, unidad, stock, stockMinimo })
+        });
+        await loadInventory();
+        supplyDialog.close();
+        showToast("Insumo creado correctamente.");
+    } catch (requestError) {
+        error.textContent = requestError.message;
+    } finally {
+        button.disabled = false;
+    }
+});
+const purchaseDialog = document.querySelector("#purchase-dialog");
+const purchaseForm = document.querySelector("#purchase-form");
+document.querySelector("#inventory-table").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-buy-supply]");
+    if (!button) return;
+    purchaseForm.dataset.supplyId = button.dataset.buySupply;
+    purchaseForm.reset();
+    document.querySelector("#purchase-error").textContent = "";
+    document.querySelector("#purchase-dialog-title").textContent = `Registrar compra · ${button.closest("tr").querySelector("strong").textContent}`;
+    purchaseDialog.showModal();
+    document.querySelector("#purchase-quantity").focus();
+});
+purchaseForm.addEventListener("submit", async (event) => {
+    if (event.submitter?.value !== "confirm") return;
+    event.preventDefault();
+    const cantidad = Number(new FormData(purchaseForm).get("cantidad"));
+    const error = document.querySelector("#purchase-error");
+    if (!Number.isFinite(cantidad) || cantidad <= 0) {
+        error.textContent = "La cantidad debe ser mayor a 0.";
+        return;
+    }
+    const button = document.querySelector("#save-purchase");
+    button.disabled = true;
+    try {
+        await requestJson(`/api/insumos/${purchaseForm.dataset.supplyId}/compra`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cantidad })
+        });
+        await loadInventory();
+        purchaseDialog.close();
+        showToast("Compra registrada correctamente.");
+    } catch (requestError) {
+        error.textContent = requestError.message;
+    } finally {
+        button.disabled = false;
+    }
+});
 
 document.querySelector("#login-form").addEventListener("submit", async (event) => {
     event.preventDefault();

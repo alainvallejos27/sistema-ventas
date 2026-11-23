@@ -144,7 +144,7 @@
 
   <dialog class="payment-dialog" id="payment-dialog" aria-labelledby="payment-title">
     <form method="dialog" id="payment-form">
-      <div class="dialog-top"><span class="dialog-kicker">CIERRE DE PEDIDO</span><button class="close-button" value="cancel" aria-label="Cerrar">×</button></div>
+      <div class="dialog-top"><span class="dialog-kicker">CIERRE DE PEDIDO</span><button class="close-button" type="button" data-dialog-cancel aria-label="Cerrar">×</button></div>
       <h2 id="payment-title">¿Cómo paga el cliente?</h2>
       <p class="dialog-copy">El sistema registra el método y el total. Confirma el pago en efectivo, QR o terminal antes de continuar.</p>
       <div class="payment-options">
@@ -160,13 +160,13 @@
   </dialog>
   <dialog class="payment-dialog entity-dialog" id="customize-dialog" aria-labelledby="customize-title">
     <form method="dialog" id="customize-form">
-      <div class="dialog-top"><span class="dialog-kicker">PERSONALIZA TU PEDIDO</span><button class="close-button" value="cancel" aria-label="Cerrar">×</button></div>
+      <div class="dialog-top"><span class="dialog-kicker">PERSONALIZA TU PEDIDO</span><button class="close-button" type="button" data-dialog-cancel aria-label="Cerrar">×</button></div>
       <h2 id="customize-title">Producto</h2><p class="dialog-copy" id="customize-description"></p>
       <label class="form-field" id="customize-size-field" for="customize-size">Tamaño<select id="customize-size" name="tamano"></select></label>
       <div id="coffee-options"><label class="form-field" for="customize-milk">Tipo de leche<select id="customize-milk" name="leche"><option value="">Sin cambio</option><option value="ENTERA">Entera</option><option value="ALMENDRA">Almendra</option><option value="DESLACTOSADA">Deslactosada</option></select></label>
         <fieldset class="add-on-options"><legend>Agregados</legend><label><input type="checkbox" name="agregado" value="VAINILLA"> Vainilla</label><label><input type="checkbox" name="agregado" value="CARAMELO"> Caramelo</label><label><input type="checkbox" name="agregado" value="CHOCOLATE"> Chocolate</label></fieldset></div>
       <p class="form-error" id="customize-error" role="alert"></p>
-      <div class="dialog-actions"><button class="filter-button" value="cancel">Cancelar</button><button class="checkout-button" id="customize-add" value="confirm">Agregar al pedido</button></div>
+      <div class="dialog-actions"><button class="filter-button" type="button" data-dialog-cancel>Cancelar</button><button class="checkout-button" id="customize-add" value="confirm">Agregar al pedido</button></div>
     </form>
   </dialog>
   <dialog class="payment-dialog ticket-dialog" id="ticket-dialog" aria-labelledby="ticket-title">
@@ -176,17 +176,17 @@
   </dialog>
   <dialog class="payment-dialog entity-dialog" id="category-dialog" aria-labelledby="category-dialog-title">
     <form method="dialog" id="category-form">
-      <div class="dialog-top"><span class="dialog-kicker">CATÁLOGO DE MOKA</span><button class="close-button" value="cancel" aria-label="Cerrar">×</button></div>
+      <div class="dialog-top"><span class="dialog-kicker">CATÁLOGO DE MOKA</span><button class="close-button" type="button" data-dialog-cancel aria-label="Cerrar">×</button></div>
       <h2 id="category-dialog-title">Nueva categoría</h2>
       <p class="dialog-copy">Crea una categoría para organizar los productos del menú.</p>
       <label class="form-field" for="category-name">Nombre<span>*</span><input id="category-name" name="nombre" required minlength="2" maxlength="60" placeholder="Ej. Bebidas frías"><small id="category-error" role="alert"></small></label>
       <label class="form-field" for="category-description">Descripción<input id="category-description" name="descripcion" maxlength="160" placeholder="Describe esta categoría"></label>
-      <div class="dialog-actions"><button class="filter-button" value="cancel">Cancelar</button><button class="checkout-button" id="save-category" value="confirm">Guardar categoría</button></div>
+      <div class="dialog-actions"><button class="filter-button" type="button" data-dialog-cancel>Cancelar</button><button class="checkout-button" id="save-category" value="confirm">Guardar categoría</button></div>
     </form>
   </dialog>
   <dialog class="payment-dialog entity-dialog" id="product-dialog" aria-labelledby="product-dialog-title">
     <form method="dialog" id="product-form">
-      <div class="dialog-top"><span class="dialog-kicker">CATÁLOGO DE MOKA</span><button class="close-button" value="cancel" aria-label="Cerrar">×</button></div>
+      <div class="dialog-top"><span class="dialog-kicker">CATÁLOGO DE MOKA</span><button class="close-button" type="button" data-dialog-cancel aria-label="Cerrar">×</button></div>
       <h2 id="product-dialog-title">Nuevo producto</h2>
       <p class="dialog-copy">Agrega un producto que estará disponible en Caja.</p>
       <div class="form-grid">
@@ -195,9 +195,35 @@
       </div>
       <label class="form-field" for="product-description">Descripción<input id="product-description" name="descripcion" maxlength="300" placeholder="Describe el producto"></label>
       <label class="form-field" for="product-price">Precio (Bs)<span>*</span><input id="product-price" name="precio" type="number" min="0" step="0.01" required placeholder="0.00"></label>
+      <label class="form-field" for="product-image">Imagen (URL)<input id="product-image" name="imagen" type="url" maxlength="2048" placeholder="https://..."></label>
       <p class="dialog-copy">El inventario se controla por insumos, no por existencias de productos terminados.</p>
       <small class="form-error" id="product-error" role="alert"></small>
-      <div class="dialog-actions"><button class="filter-button" value="cancel">Cancelar</button><button class="checkout-button" id="save-product" value="confirm">Guardar producto</button></div>
+      <div class="dialog-actions"><button class="filter-button" type="button" data-dialog-cancel>Cancelar</button><button class="checkout-button" id="save-product" value="confirm">Guardar producto</button></div>
+    </form>
+  </dialog>
+  <dialog class="payment-dialog entity-dialog" id="supply-dialog" aria-labelledby="supply-dialog-title">
+    <form method="dialog" id="supply-form">
+      <div class="dialog-top"><span class="dialog-kicker">OPERACIONES · ABASTECIMIENTO</span><button class="close-button" type="button" data-dialog-cancel aria-label="Cerrar">×</button></div>
+      <h2 id="supply-dialog-title">Nuevo insumo</h2>
+      <p class="dialog-copy">Registra un insumo y sus niveles de existencia.</p>
+      <label class="form-field" for="supply-name">Nombre del insumo<span>*</span><input id="supply-name" name="nombre" required minlength="2" maxlength="100" placeholder="Ej. Café en grano"></label>
+      <label class="form-field" for="supply-unit">Unidad<span>*</span><input id="supply-unit" name="unidad" required maxlength="30" placeholder="Ej. kg, litros, unidades"></label>
+      <div class="form-grid">
+        <label class="form-field" for="supply-stock">Stock actual / inicial<span>*</span><input id="supply-stock" name="stock" type="number" min="0" step="0.01" value="0" required></label>
+        <label class="form-field" for="supply-minimum">Stock mínimo<span>*</span><input id="supply-minimum" name="stockMinimo" type="number" min="0" step="0.01" value="0" required></label>
+      </div>
+      <small class="form-error" id="supply-error" role="alert"></small>
+      <div class="dialog-actions"><button class="filter-button" type="button" data-dialog-cancel>Cancelar</button><button class="checkout-button" id="save-supply" value="confirm">Guardar insumo</button></div>
+    </form>
+  </dialog>
+  <dialog class="payment-dialog entity-dialog" id="purchase-dialog" aria-labelledby="purchase-dialog-title">
+    <form method="dialog" id="purchase-form">
+      <div class="dialog-top"><span class="dialog-kicker">OPERACIONES · ABASTECIMIENTO</span><button class="close-button" type="button" data-dialog-cancel aria-label="Cerrar">×</button></div>
+      <h2 id="purchase-dialog-title">Registrar compra</h2>
+      <p class="dialog-copy">Indica la cantidad que se agregará al inventario.</p>
+      <label class="form-field" for="purchase-quantity">Cantidad comprada<span>*</span><input id="purchase-quantity" name="cantidad" type="number" min="0.01" step="0.01" value="1" required></label>
+      <small class="form-error" id="purchase-error" role="alert"></small>
+      <div class="dialog-actions"><button class="filter-button" type="button" data-dialog-cancel>Cancelar</button><button class="checkout-button" id="save-purchase" value="confirm">Registrar compra</button></div>
     </form>
   </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

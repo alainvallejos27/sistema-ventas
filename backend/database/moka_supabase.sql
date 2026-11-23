@@ -996,14 +996,14 @@ select v.id, i.id, x.cantidad, 'TODAS', x.opcion_agregado
   from public.productos p
   join public.categorias c on c.id = p.categoria_id and c.nombre = 'Cafés'
                             and c.sucursal_id = '00000000-0000-0000-0000-000000000001'
- where p.sucursal_id = '00000000-0000-0000-0000-000000000001'
   join public.variantes_producto v on v.producto_id = p.id
-  cross join (values
+ cross join (values
     ('VAINILLA', 'Jarabe de vainilla', 0.010::numeric),
     ('CARAMELO', 'Jarabe de caramelo', 0.010::numeric),
     ('CHOCOLATE', 'Salsa de chocolate', 0.010::numeric)
   ) as x(opcion_agregado, insumo, cantidad)
   join public.insumos i on i.nombre = x.insumo and i.sucursal_id = '00000000-0000-0000-0000-000000000001'
+ where p.sucursal_id = '00000000-0000-0000-0000-000000000001'
 on conflict (variante_id, insumo_id, opcion_leche, opcion_agregado) do nothing;
 
 -- ---------------------------------------------------------------------
