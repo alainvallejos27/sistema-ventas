@@ -409,12 +409,22 @@ function showTicket(result, paymentMethod, received, change) {
     const lines = (order.items || []).map((item) => {
         const options = item.opciones || {};
         const extras = [options.leche, ...(options.agregados || [])].filter(Boolean).join(", ");
-        return `<div class="receipt-item"><span>${item.cantidad} × ${escapeHtml(item.nombre)}${item.tamano && item.tamano !== "UNICO" ? ` · ${escapeHtml(item.tamano)}` : ""}${extras ? `<small>${escapeHtml(extras)}</small>` : ""}</span><strong>${formatMoney(Number(item.subtotal))}</strong></div>`;
+        return `<div class="receipt-item"><span><b>${item.cantidad} × ${escapeHtml(item.nombre || "Producto")}</b>${item.tamano && item.tamano !== "UNICO" ? `<small>Tamaño: ${escapeHtml(item.tamano)}</small>` : ""}${extras ? `<small>${escapeHtml(extras)}</small>` : ""}<small>${formatMoney(Number(item.precioUnitario || 0))} c/u</small></span><strong>${formatMoney(Number(item.subtotal || item.precioUnitario * item.cantidad))}</strong></div>`;
     }).join("");
+    const orderType = order.tipo === "EN_MESA" ? "En mesa" : "Para llevar";
+    const cashier = escapeHtml(currentUser?.nombre || "Caja");
+    const saleDate = new Date(result.venta.fecha || order.fecha).toLocaleString("es-BO");
     document.querySelector("#receipt-content").innerHTML = `
-        <p class="receipt-brand">MOKA · CAFETERÍA</p><p class="receipt-meta">Pedido ${escapeHtml(order.id)}<br>${new Date(result.venta.fecha).toLocaleString("es-BO")}</p>
-        <div class="receipt-lines">${lines}</div><div class="receipt-total"><span>Total</span><strong>${formatMoney(Number(result.venta.monto))}</strong></div>
-        <p class="receipt-meta">Pago: ${escapeHtml(paymentMethod)}${paymentMethod === "EFECTIVO" ? `<br>Recibido: ${formatMoney(received)}<br>Cambio: ${formatMoney(change)}` : ""}</p>
+        <p class="receipt-brand">MOKA · CAFETERÍA</p>
+        <p class="receipt-meta">
+            Pedido: #${escapeHtml(String(order.id).slice(-8).toUpperCase())}<br>
+            Venta: #${escapeHtml(String(result.venta.id).slice(-8).toUpperCase())}<br>
+            ${escapeHtml(saleDate)}<br>
+            ${orderType} · Cajero: ${cashier}
+        </p>
+        <div class="receipt-lines">${lines || '<p class="receipt-empty">Sin detalles de productos</p>'}</div>
+        <div class="receipt-total"><span>Total pagado</span><strong>${formatMoney(Number(result.venta.monto))}</strong></div>
+        <p class="receipt-meta">Método de pago: ${escapeHtml(paymentMethod)}${Number.isFinite(received) ? `<br>Recibido: ${formatMoney(received)}<br>Cambio: ${formatMoney(change)}` : ""}</p>
         <p class="receipt-thanks">Gracias por tu visita</p>`;
     document.querySelector("#ticket-dialog").showModal();
 }
@@ -466,6 +476,12 @@ document.querySelector("#payment-form").addEventListener("submit", async (event)
         updatePaymentFields();
         showToast(`Cobro de ${formatMoney(paidTotal)} registrado como ${paymentMethod}.`);
         await Promise.all([loadTodayStats(), loadOrders(), loadInventoryAlerts(), loadCashShift()]);
+        showTicket(
+            result,
+            paymentMethod,
+            paymentMethod === "EFECTIVO" ? received : undefined,
+            paymentMethod === "EFECTIVO" ? received - paidTotal : undefined
+        );
     } catch (error) {
         showToast(error.message);
     } finally {
@@ -646,7 +662,7 @@ async function loadAdminProducts() {
         const query = document.querySelector("#admin-product-search").value.toLowerCase();
         const visible = list.filter((item) => item.nombre.toLowerCase().includes(query));
         document.querySelector("#products-table").innerHTML = visible.length
-            ? visible.map((item) => `<tr><td data-label="Producto"><strong>${escapeHtml(item.nombre)}</strong><small>${escapeHtml(item.descripcion)}</small></td><td data-label="Categoría">${escapeHtml(item.categoria)}</td><td data-label="Precio">${formatMoney(Number(item.precio))}</td><td data-label="Existencias">Gestionadas por insumos</td><td data-label="Acciones"><button class="table-button" data-toggle-product="${escapeHtml(item.id)}">Desactivar</button></td></tr>`).join("")
+            ? visible.map((item) => `<tr><td data-label="Producto"><strong>${escapeHtml(item.nombre)}</strong><small>${escapeHtml(item.descripcion)}</small></td><td data-label="Categoría">${escapeHtml(item.categoria)}</td><td data-label="Precio">${formatMoney(Number(item.precio))}</td><td data-label="Existencias">Gestionadas por insumos</td><td data-label="Acciones"><div class="table-actions"><button class="table-button" type="button" data-toggle-product="${escapeHtml(item.id)}">Desactivar</button><button class="table-button table-button-danger" type="button" data-delete-product="${escapeHtml(item.id)}">Eliminar</button></div></td></tr>`).join("")
             : `<tr><td colspan="5" class="table-empty">No se encontraron productos.</td></tr>`;
     } catch (error) {
         document.querySelector("#products-table").innerHTML = `<tr><td colspan="5" class="table-empty">${escapeHtml(error.message)}</td></tr>`;
@@ -675,7 +691,7 @@ async function loadInventory() {
         badge.hidden = alerts.length === 0;
         document.querySelector("#inventory-alert").textContent = alerts.length ? `${alerts.length} insumo(s) necesitan reposición.` : "Inventario saludable: no hay alertas de stock.";
         document.querySelector("#inventory-table").innerHTML = list.length
-            ? list.map((item) => `<tr><td data-label="Insumo"><strong>${escapeHtml(item.nombre)}</strong></td><td data-label="Unidad">${escapeHtml(item.unidad)}</td><td data-label="Stock actual"><span class="${item.stock <= item.stockMinimo ? "low-stock" : ""}">${item.stock}</span></td><td data-label="Mínimo">${item.stockMinimo}</td><td data-label="Acciones"><button class="table-button" data-buy-supply="${escapeHtml(item.id)}">Registrar compra</button></td></tr>`).join("")
+            ? list.map((item) => `<tr><td data-label="Insumo"><strong>${escapeHtml(item.nombre)}</strong></td><td data-label="Unidad">${escapeHtml(item.unidad)}</td><td data-label="Stock actual"><span class="${item.stock <= item.stockMinimo ? "low-stock" : ""}">${item.stock}</span></td><td data-label="Mínimo">${item.stockMinimo}</td><td data-label="Acciones"><div class="table-actions"><button class="table-button" type="button" data-buy-supply="${escapeHtml(item.id)}">Registrar compra</button><button class="table-button table-button-danger" type="button" data-delete-supply="${escapeHtml(item.id)}">Eliminar</button></div></td></tr>`).join("")
             : `<tr><td colspan="5" class="table-empty">No hay insumos registrados.</td></tr>`;
     } catch (error) {
         document.querySelector("#inventory-alert").textContent = error.message;
@@ -760,6 +776,7 @@ document.querySelector("#orders-table").addEventListener("click", async (event) 
                 body: JSON.stringify({ pedidoId: payButton.dataset.pay, metodo: "EFECTIVO" })
             });
             showToast(`Pago en efectivo registrado: ${formatMoney(Number(result.venta.monto))}.`);
+            showTicket(result, "EFECTIVO");
         } else {
             await requestJson(`/api/pedidos/${advanceButton.dataset.advance}/estado`, {
                 method: "PATCH",
@@ -824,7 +841,33 @@ productForm.addEventListener("submit", async (event) => {
         button.disabled = false;
     }
 });
-document.querySelector("#products-table").addEventListener("click", async (event) => { const button = event.target.closest("[data-toggle-product]"); if (!button) return; try { await requestJson(`/api/productos/${button.dataset.toggleProduct}`, { method: "DELETE" }); await loadAdminProducts(); await loadProducts(); showToast("Producto desactivado."); } catch (error) { showToast(error.message); } });
+document.querySelector("#products-table").addEventListener("click", async (event) => {
+    const toggleButton = event.target.closest("[data-toggle-product]");
+    if (toggleButton) {
+        try {
+            await requestJson(`/api/productos/${encodeURIComponent(toggleButton.dataset.toggleProduct)}`, { method: "DELETE" });
+            await loadAdminProducts();
+            await loadProducts();
+            showToast("Producto desactivado.");
+        } catch (error) {
+            showToast(error.message);
+        }
+        return;
+    }
+
+    const deleteButton = event.target.closest("[data-delete-product]");
+    if (!deleteButton) return;
+    const name = deleteButton.closest("tr").querySelector("strong").textContent;
+    if (!confirm(`¿Eliminar el producto "${name}"? Esta acción quitará el producto del catálogo.`)) return;
+    try {
+        await requestJson(`/api/productos/${encodeURIComponent(deleteButton.dataset.deleteProduct)}`, { method: "DELETE" });
+        await loadAdminProducts();
+        await loadProducts();
+        showToast("Producto eliminado.");
+    } catch (error) {
+        showToast(error.message);
+    }
+});
 const categoryDialog = document.querySelector("#category-dialog");
 const categoryForm = document.querySelector("#category-form");
 document.querySelector("#new-category").addEventListener("click", () => { categoryForm.reset(); document.querySelector("#category-error").textContent = ""; categoryDialog.showModal(); document.querySelector("#category-name").focus(); });
@@ -866,14 +909,27 @@ supplyForm.addEventListener("submit", async (event) => {
 const purchaseDialog = document.querySelector("#purchase-dialog");
 const purchaseForm = document.querySelector("#purchase-form");
 document.querySelector("#inventory-table").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-buy-supply]");
-    if (!button) return;
-    purchaseForm.dataset.supplyId = button.dataset.buySupply;
-    purchaseForm.reset();
-    document.querySelector("#purchase-error").textContent = "";
-    document.querySelector("#purchase-dialog-title").textContent = `Registrar compra · ${button.closest("tr").querySelector("strong").textContent}`;
-    purchaseDialog.showModal();
-    document.querySelector("#purchase-quantity").focus();
+    const buyButton = event.target.closest("[data-buy-supply]");
+    if (buyButton) {
+        purchaseForm.dataset.supplyId = buyButton.dataset.buySupply;
+        purchaseForm.reset();
+        document.querySelector("#purchase-error").textContent = "";
+        document.querySelector("#purchase-dialog-title").textContent = `Registrar compra · ${buyButton.closest("tr").querySelector("strong").textContent}`;
+        purchaseDialog.showModal();
+        document.querySelector("#purchase-quantity").focus();
+        return;
+    }
+
+    const deleteButton = event.target.closest("[data-delete-supply]");
+    if (!deleteButton) return;
+    const name = deleteButton.closest("tr").querySelector("strong").textContent;
+    if (!confirm(`¿Eliminar el insumo "${name}"?`)) return;
+    requestJson(`/api/insumos/${encodeURIComponent(deleteButton.dataset.deleteSupply)}`, { method: "DELETE" })
+        .then(async () => {
+            await loadInventory();
+            showToast("Insumo eliminado.");
+        })
+        .catch((error) => showToast(error.message));
 });
 purchaseForm.addEventListener("submit", async (event) => {
     if (event.submitter?.value !== "confirm") return;

@@ -194,6 +194,9 @@ h2 { margin: 0; font: 500 23px/1.2 var(--serif); letter-spacing: 0; }
 .data-table td small { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; }
 .table-button { padding: 7px 10px; border: 1px solid #d9e2d5; border-radius: 4px; background: #f3f6ef; color: var(--green-dark); font-size: 10px; font-weight: 700; }
 .table-button:hover { background: #e3eee0; }
+.table-actions { display: flex; align-items: center; gap: 6px; }
+.table-button-danger { border-color: #e2bcbc; background: #fff5f5; color: #9b3d3d; }
+.table-button-danger:hover { border-color: #d9aaaa; background: #fdeaea; }
 .table-button.delivery-complete, .table-button.delivery-complete:disabled { border-color: #c9dbe5; background: #e4edf3; color: #456a80; cursor: default; }
 .order-item { display: flex; align-items: center; gap: 7px; margin-top: 5px; }
 .order-item img, .order-item-placeholder { width: 28px; height: 28px; flex: 0 0 28px; border-radius: 4px; object-fit: cover; background: #edf1e9; }
@@ -251,6 +254,8 @@ h2 { margin: 0; font: 500 23px/1.2 var(--serif); letter-spacing: 0; }
 .receipt-item span { min-width: 0; }
 .receipt-item small { display: block; margin-top: 3px; color: #777e74; }
 .receipt-item strong { white-space: nowrap; }
+.receipt-item span b { display: block; font-size: 11px; }
+.receipt-empty { margin: 12px 0; color: #777e74; text-align: center; }
 .receipt-total { display: flex; justify-content: space-between; padding: 11px 0; font-size: 13px; font-weight: 700; }
 .receipt-thanks { margin: 11px 0 0; color: var(--green-dark); }
 @media print {
